@@ -22,13 +22,13 @@ const
   ResponseCode_ERR : uint8 = 255
 
   NullColumn       = char(0xFB)
-  
+
   HandshakeV10 : uint8 = 0x0A  # Initial handshake packet since MySQL 3.21
 
   Charset_swedish_ci : uint8 = 0x08
   Charset_utf8_ci    : uint8 = 0x21
   Charset_binary     : uint8 = 0x3f
-  
+
 type
   # These correspond to the bits in the capability words,
   # and the CLIENT_FOO_BAR definitions in mysql. We rely on
@@ -78,10 +78,10 @@ type
     psOutParams = 12
     inTransactionReadOnly = 13 # in a read-only transaction
     sessionStateChanged = 14 # connection state information has changed
-    
+
   # These correspond to the CMD_FOO definitions in mysql.
   # Commands marked "internal to the server", and commands
-  # only used by the replication protocol, are commented out  
+  # only used by the replication protocol, are commented out
   Command {.pure.} = enum
     # sleep = 0
     quiT = 1
@@ -169,7 +169,7 @@ type
     fieldTypeVarString   = uint8(253)
     fieldTypeString      = uint8(254)
     fieldTypeGeometry    = uint8(255)
-    
+
 type
   Connection = ref ConnectionObj
   ConnectionObj = object of RootObj
@@ -183,7 +183,7 @@ type
     server_caps: set[Cap]
     scramble: string
     authentication_plugin: string
-    
+
   ProtocolError = object of IOError
 
   # Server response packets: OK and EOF
@@ -236,7 +236,7 @@ proc putU8(buf: var string, val: uint8) {.inline.} =
   buf.add( char(val) )
 proc putU8(buf: var string, val: int) {.inline.} =
   buf.add( char(val) )
-  
+
 proc scanLenInt(buf: string, pos: var int): int =
   let b1 = uint8(buf[pos])
   if b1 < 251:
@@ -268,15 +268,15 @@ proc putLenInt(buf: var string, val: int) =
   else:
     raise newException(ProtocolError, "lenenc-int too long for me!")
 
-# Strings      
+# Strings
 proc scanNulString(buf: string, pos: var int): string =
-  result = ""  
+  result = ""
   while buf[pos] != char(0):
     result.add(buf[pos])
     inc(pos)
   inc(pos)
 proc scanNulStringX(buf: string, pos: var int): string =
-  result = ""  
+  result = ""
   while pos < high(buf) and buf[pos] != char(0):
     result.add(buf[pos])
     inc(pos)
@@ -289,11 +289,8 @@ proc scanLenStr(buf: string, pos: var int): string =
   let slen = scanLenInt(buf, pos)
   if slen < 0:
     raise newException(ProtocolError, "lenenc-int: is 0x" & toHex(int(buf[pos]), 2))
-  var s = newString(slen)
-  for i in 0 .. slen-1:
-    s[i] = buf[pos+i]
+  result = substr(buf, pos, pos+slen-1)
   pos = pos + slen
-  return s
 
 proc hexdump(buf: openarray[char], fp: File) =
   var pos = low(buf)
@@ -318,19 +315,19 @@ proc hexdump(s: string, fp: File) =
 
 ## ######################################################################
 ##
-## MySQL-specific packers/unpackers  
-  
-proc processHeader(c: Connection, hdr: array[4, char]) = 
+## MySQL-specific packers/unpackers
+
+proc processHeader(c: Connection, hdr: array[4, char]) =
   let plength = int32(hdr[0]) + int32(hdr[1])*256 + int32(hdr[2])*65536
   let pnum = uint8(hdr[3])
   stdmsg.writeln("plen=", plength, ", pnum=", pnum, " (expecting ", c.packet_number, ")")
   if pnum != c.packet_number:
     raise newException(ProtocolError, "Bad packet number")
   c.packet_number += 1
-  c.remaining_packet_length = plength  
+  c.remaining_packet_length = plength
 
 when false:
-  # Prototype synchronous code      
+  # Prototype synchronous code
   proc readExactly(s: Socket, buf: var openarray[char]) =
     var amount_read: int = 0
     while amount_read < len(buf):
@@ -347,7 +344,7 @@ when false:
     c.remaining_packet_length = 0
 
   proc receivePacket(conn: Connection): string =
-    var b: array[4, char]    
+    var b: array[4, char]
     readExactly(conn.socket, b)
     processHeader(conn, b)
     let pkt = conn.readBody()
@@ -378,9 +375,9 @@ else:
     if len(result) != conn.remaining_packet_length:
       raise newException(ProtocolError, "TODO finish this part")
     conn.remaining_packet_length = 0
-        
+
 # Caller must have left the first four bytes of the buffer available for
-# us to write the packet header.    
+# us to write the packet header.
 proc sendPacket(conn: Connection, buf: var string): Future[void] =
   let bodylen = len(buf) - 4
   buf[0] = char( (bodylen and 0xFF) )
@@ -390,7 +387,7 @@ proc sendPacket(conn: Connection, buf: var string): Future[void] =
   inc(conn.packet_number)
   hexdump(buf, stdmsg)
   return conn.socket.send(buf)
-  
+
 proc parseInitialGreeting(conn: Connection, greeting: string) =
   let protocolVersion = uint8(greeting[0])
   if protocolVersion != HandshakeV10:
@@ -406,7 +403,7 @@ proc parseInitialGreeting(conn: Connection, greeting: string) =
 
   if not (Cap.protocol41 in conn.server_caps):
     raise newException(ProtocolError, "Old (pre-4.1) server protocol")
-  
+
   if len(greeting) >= (pos+5):
     let cflags_h = scanU16(greeting, pos+3)
     conn.server_caps = cast[set[Cap]]( uint32(cflags_l) + (uint32(cflags_h) shl 16) )
@@ -422,7 +419,7 @@ proc parseInitialGreeting(conn: Connection, greeting: string) =
 proc add(s: var string, a: seq[char]) =
   for ch in a:
     s.add(ch)
-  
+
 proc writeHandshakeResponse(conn: Connection,
                             username: string,
                             auth_response: seq[char],
@@ -430,7 +427,7 @@ proc writeHandshakeResponse(conn: Connection,
                             auth_plugin: string): Future[void] =
   var buf: string = newStringOfCap(128)
   buf.setLen(4)
-  
+
   var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection }
   if Cap.longFlag in conn.server_caps:
     incl(caps, Cap.longFlag)
@@ -518,7 +515,7 @@ proc parseRow(pkt: string): seq[string] =
       inc(pos)
     else:
       result.add(pkt.scanLenStr(pos))
-  
+
 proc blah() {. async .} =
   let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
   await connect(sock, "localhost", Port(3306))
@@ -547,4 +544,3 @@ proc foof() =
   stdmsg.writeln("done")
 
 foof()
-  
