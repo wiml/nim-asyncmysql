@@ -1,5 +1,5 @@
 ##
-## This module implements a (subset of) the MySQL/MariaDB client
+## This module implements (a subset of) the MySQL/MariaDB client
 ## protocol based on asyncnet and asyncdispatch.
 ##
 ## No attempt is made to make this look like the C-language
@@ -23,6 +23,10 @@ const
 
   NullColumn       = char(0xFB)
 
+  LenEnc_16        = 0xFC
+  LenEnc_24        = 0xFD
+  LenEnc_64        = 0xFE
+  
   HandshakeV10 : uint8 = 0x0A  # Initial handshake packet since MySQL 3.21
 
   Charset_swedish_ci : uint8 = 0x08
@@ -163,7 +167,7 @@ type
     fieldTypeEnum        = uint8(247)
     fieldTypeSet         = uint8(248)
     fieldTypeTinyBlob    = uint8(249)
-    FieldtypeMediumBlob  = uint8(250)
+    fieldTypeMediumBlob  = uint8(250)
     fieldTypeLongBlob    = uint8(251)
     fieldTypeBlob        = uint8(252)
     fieldTypeVarString   = uint8(253)
@@ -188,18 +192,18 @@ type
 
   # Server response packets: OK and EOF
   ResponseOK = object {.final.}
-    ok: bool
-    affected_rows: Positive
-    last_insert_id: Positive
+    eof: bool  # True if EOF packet, false if OK packet
+    affected_rows: Natural
+    last_insert_id: Natural
     status_flags: set[Status]
-    warning_count: int
+    warning_count: Natural
     info: string
     # session_state_changes: seq[ ... ]
 
   # Server response packet: ERR (which can be thrown as an exception)
   ResponseERR = object of SystemError
-    status_flags: set[Status]
-    warning_count: int
+    error_code: uint16
+    sqlstate: string
 
   ColumnDefinition* = object of RootObj
     catalog     : string
@@ -215,11 +219,16 @@ type
     flags       : set[FieldFlag]
     decimals    : int
 
+  BufferedResultSet* = object of RootObj
+    columns     : seq[ColumnDefinition]
+    rows        : seq[seq[string]]
+
 ## ######################################################################
 ##
 ## Basic datatype packers/unpackers
 
 # Integers
+
 proc scanU32(buf: string, pos: int): uint32 =
   result = uint32(buf[pos]) + `shl`(uint32(buf[pos+1]), 8'u32) + (uint32(buf[pos+2]) shl 16'u32) + (uint32(buf[pos+3]) shl 24'u32)
 proc putU32(buf: var string, val: uint32) =
@@ -234,7 +243,7 @@ proc scanU16(buf: string, pos: int): uint16 =
 
 proc putU8(buf: var string, val: uint8) {.inline.} =
   buf.add( char(val) )
-proc putU8(buf: var string, val: int) {.inline.} =
+proc putU8(buf: var string, val: range[0..255]) {.inline.} =
   buf.add( char(val) )
 
 proc scanLenInt(buf: string, pos: var int): int =
@@ -242,11 +251,11 @@ proc scanLenInt(buf: string, pos: var int): int =
   if b1 < 251:
     inc(pos)
     return int(b1)
-  if b1 == 0xFC:
+  if b1 == LenEnc_16:
     result = int(uint16(buf[pos+1]) + ( uint16(buf[pos+2]) shl 8 ))
     pos = pos + 3
     return
-  if b1 == 0xFD:
+  if b1 == LenEnc_24:
     result = int(uint32(buf[pos+1]) + ( uint32(buf[pos+2]) shl 8 ) + ( uint32(buf[pos+3]) shl 16 ))
     pos = pos + 4
     return
@@ -257,11 +266,11 @@ proc putLenInt(buf: var string, val: int) =
   elif val < 251:
     buf.add( char(val) )
   elif val < 65536:
-    buf.add( char(0xFC) )
+    buf.add( char(LenEnc_16) )
     buf.add( char( val and 0xFF ) )
     buf.add( char( (val shr 8) and 0xFF ) )
   elif val <= 0xFFFFFF:
-    buf.add( char(0xFD) )
+    buf.add( char(LenEnc_24) )
     buf.add( char( val and 0xFF ) )
     buf.add( char( (val shr 8) and 0xFF ) )
     buf.add( char( (val shr 24) and 0xFF ) )
@@ -291,7 +300,10 @@ proc scanLenStr(buf: string, pos: var int): string =
     raise newException(ProtocolError, "lenenc-int: is 0x" & toHex(int(buf[pos]), 2))
   result = substr(buf, pos, pos+slen-1)
   pos = pos + slen
-
+proc putLenStr(buf: var string, val: string) =
+  putLenInt(buf, val.len)
+  buf.add(val)
+  
 proc hexdump(buf: openarray[char], fp: File) =
   var pos = low(buf)
   while pos <= high(buf):
@@ -431,12 +443,12 @@ proc writeHandshakeResponse(conn: Connection,
   var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection }
   if Cap.longFlag in conn.server_caps:
     incl(caps, Cap.longFlag)
-  if auth_response != nil:
+  if not isNil(auth_response):
     if len(auth_response) > 255:
       incl(caps, Cap.pluginAuthLenencClientData)
-  if database != nil:
+  if not isNil(database):
     incl(caps, Cap.connectWithDb)
-  if auth_plugin != nil:
+  if not isNil(auth_plugin):
     incl(caps, Cap.pluginAuth)
 
   # Fixed-length portion
@@ -452,7 +464,7 @@ proc writeHandshakeResponse(conn: Connection,
   putNulString(buf, username)
 
   # Authentication data
-  if auth_response != nil:
+  if not isNil(auth_response):
     if Cap.pluginAuthLenencClientData in caps:
       putLenInt(buf, len(auth_response))
       buf.add(auth_response)
