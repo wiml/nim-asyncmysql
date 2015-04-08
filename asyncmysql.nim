@@ -11,7 +11,6 @@
 ##
 
 import strutils, unsigned, asyncnet, asyncdispatch
-from rawsockets import AF_INET, SOCK_STREAM
 
 # These are protocol constants; see
 #  https://dev.mysql.com/doc/internals/en/overview.html
@@ -26,7 +25,7 @@ const
   LenEnc_16        = 0xFC
   LenEnc_24        = 0xFD
   LenEnc_64        = 0xFE
-  
+
   HandshakeV10 : uint8 = 0x0A  # Initial handshake packet since MySQL 3.21
 
   Charset_swedish_ci : uint8 = 0x08
@@ -174,30 +173,93 @@ type
     fieldTypeString      = uint8(254)
     fieldTypeGeometry    = uint8(255)
 
+  CursorType* {.pure.} = enum
+    noCursor             = 0
+    readOnly             = 1
+    forUpdate            = 2
+    scrollable           = 3
+
+  # This represents a value returned from the server when using
+  # the prepared statement / binary protocol. For convenience's sake
+  # we combine multiple wire types into the nearest Nim type.
+  ResultValType = enum
+    rvtNull,
+    rvtInteger,
+    rvtLong,
+    rvtULong,
+    rvtFloat32,
+    rvtFloat64,
+    rvtDate,
+    rvtTime,
+    rvtDateTime,
+    rvtString,
+    rvtBlob
+  BinaryValue = object
+    case typ: ResultValType
+      of rvtInteger:
+        intVal: int
+      of rvtLong:
+        longVal: int64
+      of rvtULong:
+        uLongVal: uint64
+      of rvtString, rvtBlob:
+        strVal: string
+      of rvtNull:
+        discard
+      of rvtFloat32, rvtFloat64:
+        discard # TODO
+      of rvtDate, rvtTime, rvtDateTime:
+        discard # TODO
+
+  ParamBindingType = enum
+    paramNull,
+    paramString,
+    paramBlob,
+    paramInt,
+    paramUInt,
+    # paramFloat, paramDouble,
+    # paramLazyString, paramLazyBlob,
+  ParameterBinding* = object
+    ## This represents a value we're sending to the server as a parameter.
+    ## Since parameters' types are always sent along with their values,
+    ## we choose the wire type of integers based on the particular value we're sending.
+    case typ: ParamBindingType
+    of paramNull:
+      discard
+    of paramString, paramBlob:
+      strVal: string not nil
+    of paramInt:
+      intVal: int64
+    of paramUInt:
+      uintVal: uint64
+
 type
-  Connection = ref ConnectionObj
+  nat24 = range[0 .. 16777215]
+  Connection* = ref ConnectionObj
   ConnectionObj = object of RootObj
     socket: AsyncSocket               # Bytestream connection
     packet_number: uint8              # Next expected seq number (mod-256)
-    remaining_packet_length: range[0 .. 16777215]  # How many bytes remain to be read in current packet
 
     # Information from the connection setup
     server_version: string
     thread_id: uint32
     server_caps: set[Cap]
-    scramble: string
-    authentication_plugin: string
 
+    # Other connection parameters
+    client_caps: set[Cap]
+
+  # ProtocolError indicates we got something we don't understand. We might
+  # even have lost framing, etc.. The connection should really be closed at this point.
   ProtocolError = object of IOError
 
   # Server response packets: OK and EOF
   ResponseOK = object {.final.}
-    eof: bool  # True if EOF packet, false if OK packet
-    affected_rows: Natural
-    last_insert_id: Natural
-    status_flags: set[Status]
-    warning_count: Natural
-    info: string
+    eof               : bool  # True if EOF packet, false if OK packet
+    affected_rows*    : Natural
+    last_insert_id*   : Natural
+    status_flags*     : set[Status]
+    warning_count*    : Natural
+    info*             : string
     # session_state_changes: seq[ ... ]
 
   # Server response packet: ERR (which can be thrown as an exception)
@@ -206,22 +268,34 @@ type
     sqlstate: string
 
   ColumnDefinition* = object of RootObj
-    catalog     : string
-    schema      : string
-    table       : string
-    orig_table  : string
-    name        : string
-    orig_name   : string
+    catalog*     : string
+    schema*      : string
+    table*       : string
+    orig_table*  : string
+    name*        : string
+    orig_name*   : string
 
-    charset     : int16
-    length      : uint32
-    column_type : FieldType
-    flags       : set[FieldFlag]
-    decimals    : int
+    charset      : int16
+    length*      : uint32
+    column_type* : FieldType
+    flags*       : set[FieldFlag]
+    decimals*    : int
 
-  BufferedResultSet* = object of RootObj
-    columns     : seq[ColumnDefinition]
-    rows        : seq[seq[string]]
+  ResultSet*[T] = object {.final.}
+    status*     : ResponseOK
+    columns*    : seq[ColumnDefinition]
+    rows*       : seq[seq[T]]
+
+  PreparedStatement* = ref PreparedStatementObj
+  PreparedStatementObj = object
+    statement_id: array[4, char]
+    parameters: seq[ColumnDefinition]
+    columns: seq[ColumnDefinition]
+    warnings: Natural
+
+proc add(s: var string, a: seq[char]) =
+  for ch in a:
+    s.add(ch)
 
 ## ######################################################################
 ##
@@ -239,12 +313,23 @@ proc putU32(buf: var string, val: uint32) =
 
 proc scanU16(buf: string, pos: int): uint16 =
   result = uint16(buf[pos]) + (uint16(buf[pos+1]) shl 8'u16)
-  stdmsg.writeln("u16=", result)
+proc putU16(buf: var string, val: uint16) =
+  buf.add( char( val and 0xFF ) )
+  buf.add( char( (val shr 8) and 0xFF ) )
 
 proc putU8(buf: var string, val: uint8) {.inline.} =
   buf.add( char(val) )
 proc putU8(buf: var string, val: range[0..255]) {.inline.} =
   buf.add( char(val) )
+
+proc scanU64(buf: string, pos: int): uint64 =
+  let l32 = scanU32(buf, pos)
+  let h32 = scanU32(buf, pos+4)
+  return uint64(l32) + ( (uint64(h32) shl 32 ) )
+proc putS64(buf: var string, val: int64) =
+  let compl: uint64 = cast[uint64](val)
+  buf.putU32(uint32(compl and 0xFFFFFFFF))
+  buf.putU32(uint32(compl shr 32))
 
 proc scanLenInt(buf: string, pos: var int): int =
   let b1 = uint8(buf[pos])
@@ -286,7 +371,7 @@ proc scanNulString(buf: string, pos: var int): string =
   inc(pos)
 proc scanNulStringX(buf: string, pos: var int): string =
   result = ""
-  while pos < high(buf) and buf[pos] != char(0):
+  while pos <= high(buf) and buf[pos] != char(0):
     result.add(buf[pos])
     inc(pos)
   inc(pos)
@@ -303,7 +388,7 @@ proc scanLenStr(buf: string, pos: var int): string =
 proc putLenStr(buf: var string, val: string) =
   putLenInt(buf, val.len)
   buf.add(val)
-  
+
 proc hexdump(buf: openarray[char], fp: File) =
   var pos = low(buf)
   while pos <= high(buf):
@@ -327,16 +412,120 @@ proc hexdump(s: string, fp: File) =
 
 ## ######################################################################
 ##
-## MySQL-specific packers/unpackers
+## Parameter and result packers/unpackers
 
-proc processHeader(c: Connection, hdr: array[4, char]) =
-  let plength = int32(hdr[0]) + int32(hdr[1])*256 + int32(hdr[2])*65536
+proc addTypeUnlessNULL(p: ParameterBinding, pkt: var string) =
+  case p.typ
+  of paramNull:
+    return
+  of paramString:
+    pkt.add(char(fieldTypeString))
+    pkt.add(char(0))
+  of paramBlob:
+    pkt.add(char(fieldTypeBlob))
+    pkt.add(char(0))
+  of paramInt:
+    if p.intVal >= 0:
+      if p.intVal < 256'i64:
+        pkt.add(char(fieldTypeTiny))
+      elif p.intVal < 65536'i64:
+        pkt.add(char(fieldTypeShort))
+      elif p.intVal < (65536'i64 * 65536'i64):
+        pkt.add(char(fieldTypeLong))
+      else:
+        pkt.add(char(fieldTypeLongLong))
+      pkt.add(char(0x80))
+    else:
+      if p.intVal >= -128:
+        pkt.add(char(fieldTypeTiny))
+      elif p.intVal >= -32768:
+        pkt.add(char(fieldTypeShort))
+      else:
+        pkt.add(char(fieldTypeLongLong))
+      pkt.add(char(0))
+  of paramUInt:
+    if p.uintVal < (65536'u64 * 65536'u64):
+      pkt.add(char(fieldTypeLong))
+    else:
+      pkt.add(char(fieldTypeLongLong))
+    pkt.add(char(0x80))
+
+proc addValueUnlessNULL(p: ParameterBinding, pkt: var string) =
+  case p.typ
+  of paramNull:
+    return
+  of paramString, paramBlob:
+    putLenStr(pkt, p.strVal)
+  of paramInt:
+    if p.intVal >= 0:
+      pkt.putU8(p.intVal and 0xFF)
+      if p.intVal >= 256:
+        pkt.putU8((p.intVal shr 8) and 0xFF)
+        if p.intVal >= 65536:
+          pkt.putU16((p.intVal shr 16) and 0xFFFF)
+          if p.intVal >= (65536'i64 * 65536'i64):
+            pkt.putU32(uint32(p.intVal shr 32))
+    else:
+      if p.intVal >= -128:
+        pkt.putU8(uint8(p.intVal + 256))
+      elif p.intVal >= -32768:
+        pkt.putU16(uint16(p.intVal + 65536))
+      else:
+        pkt.putS64(p.intVal)
+  of paramUInt:
+    putU32(pkt, uint32(p.uintVal and 0xFFFFFFFF'u64))
+    if p.uintVal >= 0xFFFFFFFF'u64:
+      putU32(pkt, uint32(p.uintVal shr 32))
+
+proc approximatePackedSize(p: ParameterBinding): int {.inline.} =
+  case p.typ
+  of paramNull:
+    return 0
+  of paramString, paramBlob:
+    return 5 + len(p.strVal)
+  of paramInt, paramUInt:
+    return 4
+
+proc asParam*(s: string): ParameterBinding =
+  if isNil(s):
+    ParameterBinding(typ: paramNull)
+  else:
+    ParameterBinding(typ: paramString, strVal: s)
+proc asParam*(i: int): ParameterBinding = ParameterBinding(typ: paramInt, intVal: i)
+proc asParam*(i: uint): ParameterBinding =
+  if i > uint(high(int)):
+    ParameterBinding(typ: paramUInt, uintVal: uint64(i))
+  else:
+    ParameterBinding(typ: paramInt, intVal: int64(i))
+proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVal: if b: 1 else: 0)
+
+proc isNil*(v: BinaryValue): bool = v.typ == rvtNull
+proc `$`*(v: BinaryValue): string =
+  case v.typ
+  of rvtNull:
+    return "NULL"
+  of rvtString, rvtBlob:
+    return v.strVal
+  of rvtInteger:
+    return $(v.intVal)
+  of rvtLong:
+    return $(v.longVal)
+  of rvtULong:
+    return $(v.uLongVal)
+  else:
+    return "(unrepresentable!)"
+
+## ######################################################################
+##
+## MySQL packet packers/unpackers
+
+proc processHeader(c: Connection, hdr: array[4, char]): nat24 =
+  result = int32(hdr[0]) + int32(hdr[1])*256 + int32(hdr[2])*65536
   let pnum = uint8(hdr[3])
-  stdmsg.writeln("plen=", plength, ", pnum=", pnum, " (expecting ", c.packet_number, ")")
+  # stdmsg.writeln("plen=", result, ", pnum=", pnum, " (expecting ", c.packet_number, ")")
   if pnum != c.packet_number:
-    raise newException(ProtocolError, "Bad packet number")
+    raise newException(ProtocolError, "Bad packet number (got sequence number " & $(pnum) & ", expected " & $(c.packet_number) & ")")
   c.packet_number += 1
-  c.remaining_packet_length = plength
 
 when false:
   # Prototype synchronous code
@@ -350,16 +539,12 @@ when false:
         raise newException(ProtocolError, "Connection closed")
       amount_read += r
 
-  proc readBody(c: Connection): seq[char] =
-    result = newSeq[char](c.remaining_packet_length)
-    c.socket.readExactly(result)
-    c.remaining_packet_length = 0
-
   proc receivePacket(conn: Connection): string =
     var b: array[4, char]
     readExactly(conn.socket, b)
-    processHeader(conn, b)
-    let pkt = conn.readBody()
+    let packet_length = processHeader(conn, b)
+    let pkt = newSeq[char](packet_length)
+    conn.socket.readExactly(pkt)
     result = newString(len(pkt))
     # ugly, why are seq[char] and string so hard to interconvert?
     for i in 0 .. high(pkt):
@@ -378,29 +563,35 @@ else:
     if len(hdr) != 4:
       raise newException(ProtocolError, "Connection closed unexpectedly")
     let b = cast[ptr array[4,char]](cstring(hdr))
-    conn.processHeader(b[])
-    if conn.remaining_packet_length == 0:
+    let packet_length = conn.processHeader(b[])
+    if packet_length == 0:
       return ""
-    result = await conn.socket.recv(conn.remaining_packet_length)
+    result = await conn.socket.recv(packet_length)
     if len(result) == 0:
       raise newException(ProtocolError, "Connection closed unexpectedly")
-    if len(result) != conn.remaining_packet_length:
+    if len(result) != packet_length:
       raise newException(ProtocolError, "TODO finish this part")
-    conn.remaining_packet_length = 0
 
 # Caller must have left the first four bytes of the buffer available for
 # us to write the packet header.
-proc sendPacket(conn: Connection, buf: var string): Future[void] =
+proc sendPacket(conn: Connection, buf: var string, reset_seq_no = false): Future[void] =
   let bodylen = len(buf) - 4
   buf[0] = char( (bodylen and 0xFF) )
   buf[1] = char( ((bodylen shr 8) and 0xFF) )
   buf[2] = char( ((bodylen shr 16) and 0xFF) )
+  if reset_seq_no:
+    conn.packet_number = 0
   buf[3] = char( conn.packet_number )
   inc(conn.packet_number)
-  hexdump(buf, stdmsg)
+  # hexdump(buf, stdmsg)
   return conn.socket.send(buf)
 
-proc parseInitialGreeting(conn: Connection, greeting: string) =
+type
+  greetingVars {.final.} = object
+    scramble: string
+    authentication_plugin: string
+
+proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
   let protocolVersion = uint8(greeting[0])
   if protocolVersion != HandshakeV10:
     raise newException(ProtocolError, "Unexpected protocol version: 0x" & toHex(int(protocolVersion), 2))
@@ -408,7 +599,7 @@ proc parseInitialGreeting(conn: Connection, greeting: string) =
   conn.server_version = scanNulString(greeting, pos)
   conn.thread_id = scanU32(greeting, pos)
   pos += 4
-  conn.scramble = greeting[pos .. pos+7]
+  result.scramble = greeting[pos .. pos+7]
   let cflags_l = scanU16(greeting, pos + 8 + 1)
   conn.server_caps = cast[set[Cap]](cflags_l)
   pos += 11
@@ -422,15 +613,11 @@ proc parseInitialGreeting(conn: Connection, greeting: string) =
 
     let moreScram = ( if Cap.protocol41 in conn.server_caps: int(greeting[pos+5]) else: 0 )
     if moreScram > 8:
-      conn.scramble.add(greeting[pos + 16 .. pos + 16 + moreScram - 8 - 2])
+      result.scramble.add(greeting[pos + 16 .. pos + 16 + moreScram - 8 - 2])
     pos = pos + 16 + ( if moreScram < 20: 12 else: moreScram - 8 )
 
     if Cap.pluginAuth in conn.server_caps:
-      conn.authentication_plugin = scanNulStringX(greeting, pos)
-
-proc add(s: var string, a: seq[char]) =
-  for ch in a:
-    s.add(ch)
+      result.authentication_plugin = scanNulStringX(greeting, pos)
 
 proc writeHandshakeResponse(conn: Connection,
                             username: string,
@@ -450,6 +637,8 @@ proc writeHandshakeResponse(conn: Connection,
     incl(caps, Cap.connectWithDb)
   if not isNil(auth_plugin):
     incl(caps, Cap.pluginAuth)
+
+  conn.client_caps = caps
 
   # Fixed-length portion
   putU32(buf, cast[uint32](caps))
@@ -487,15 +676,14 @@ proc sendQuery(conn: Connection, query: string): Future[void] =
   buf.setLen(4)
   buf.add( char(Command.query) )
   buf.add(query)
-  conn.packet_number = 0
-  return conn.sendPacket(buf)
+  return conn.sendPacket(buf, reset_seq_no=true)
 
-proc receiveMetadata(conn: Connection, count: int): Future[seq[ColumnDefinition]] {.async.}  =
+proc receiveMetadata(conn: Connection, count: Positive): Future[seq[ColumnDefinition]] {.async.}  =
   var received = 0
   result = newSeq[ColumnDefinition](count)
   while received < count:
     let pkt = await conn.receivePacket()
-    hexdump(pkt, stdmsg)
+    # hexdump(pkt, stdmsg)
     if uint8(pkt[0]) == ResponseCode_ERR or uint8(pkt[0]) == ResponseCode_EOF:
       raise newException(ProtocolError, "TODO")
     var pos = 0
@@ -518,7 +706,7 @@ proc receiveMetadata(conn: Connection, count: int): Future[seq[ColumnDefinition]
   if uint8(endPacket[0]) != ResponseCode_EOF:
     raise newException(ProtocolError, "Expected EOF after column defs, got something else")
 
-proc parseRow(pkt: string): seq[string] =
+proc parseTextRow(pkt: string): seq[string] =
   var pos = 0
   result = newSeq[string]()
   while pos < len(pkt):
@@ -528,31 +716,255 @@ proc parseRow(pkt: string): seq[string] =
     else:
       result.add(pkt.scanLenStr(pos))
 
-proc blah() {. async .} =
-  let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
-  await connect(sock, "localhost", Port(3306))
-  stdmsg.writeln("woo hoo")
-  let conn = Connection(socket:sock)
-  parseInitialGreeting(conn, await conn.receivePacket())
-  await writeHandshakeResponse(conn,
-    "root",
-    nil, "mysql", nil)
-  hexdump(await conn.receivePacket(), stdmsg)
-  await conn.sendQuery("select * from user")
-  let r = await conn.receivePacket()
-  hexdump(r, stdmsg)
-  var p = 0
-  let cols = await conn.receiveMetadata(scanLenInt(r, p))
-  stdmsg.writeln("it is", cols)
-  while true:
-    let pkt = await conn.receivePacket()
-    pkt.hexdump(stdmsg)
-    stdmsg.writeln("row=", repr(parseRow(pkt)))
+# EOF is signaled by a packet that starts with 0xFE, which is
+# also a valid length-encoded-integer. In order to distinguish
+# between the two cases, we check the length of the packet: EOFs
+# are always short, and an 0xFE in a result row would be followed
+# by at least 65538 bytes of data.
+proc isEOFPacket(pkt: string): bool =
+  result = (len(pkt) >= 1) and (pkt[0] == char(ResponseCode_EOF)) and (len(pkt) < 9)
 
-proc foof() =
-  let fut = blah()
-  stdmsg.writeln("starting loop")
-  waitFor(fut)
-  stdmsg.writeln("done")
+# Error packets are simpler to detect, because 0xFF is not (yet?)
+# valid as the start of a length-encoded-integer.
+proc isERRPacket(pkt: string): bool = (len(pkt) >= 3) and (pkt[0] == char(ResponseCode_ERR))
 
-foof()
+proc isOKPacket(pkt: string): bool = (len(pkt) >= 3) and (pkt[0] == char(ResponseCode_OK))
+
+proc parseErrorPacket(pkt: string): ref ResponseERR =
+  new(result)
+  result.error_code = scanU16(pkt, 1)
+  var pos: int
+  if len(pkt) >= 9 and pkt[3] == '#':
+    result.sqlstate = pkt.substr(4, 8)
+    pos = 9
+  else:
+    pos = 3
+  result.msg = pkt[pos .. high(pkt)]
+
+proc parseOKPacket(conn: Connection, pkt: string): ResponseOK =
+  result.eof = false
+  var pos: int = 1
+  result.affected_rows = scanLenInt(pkt, pos)
+  result.last_insert_id = scanLenInt(pkt, pos)
+  # We always supply Cap.protocol41 in client caps
+  result.status_flags = cast[set[Status]]( scanU16(pkt, pos) )
+  result.warning_count = scanU16(pkt, pos+2)
+  pos = pos + 4
+  if Cap.sessionTrack in conn.client_caps:
+    result.info = scanLenStr(pkt, pos)
+  else:
+    result.info = scanNulStringX(pkt, pos)
+
+proc parseEOFPacket(pkt: string): ResponseOK =
+  result.eof = true
+  result.warning_count = scanU16(pkt, 1)
+  result.status_flags = cast[set[Status]]( scanU16(pkt, 3) )
+
+proc prepareStatement*(conn: Connection, query: string): Future[PreparedStatement] {.async.} =
+  var buf: string = newStringOfCap(4 + 1 + len(query))
+  buf.setLen(4)
+  buf.add( char(Command.statementPrepare) )
+  buf.add(query)
+  await conn.sendPacket(buf, reset_seq_no=true)
+  let pkt = await conn.receivePacket()
+  if isERRPacket(pkt):
+    raise parseErrorPacket(pkt)
+  if pkt[0] != char(ResponseCode_OK) or len(pkt) < 12:
+    raise newException(ProtocolError, "Unexpected response to STMT_PREPARE (len=" & $(pkt.len) & ", first byte=0x" & toHex(int(pkt[0]), 2) & ")")
+  let num_columns = scanU16(pkt, 5)
+  let num_params = scanU16(pkt, 7)
+  let num_warnings = scanU16(pkt, 10)
+
+  new(result)
+  result.warnings = num_warnings
+  for b in 0 .. 3: result.statement_id[b] = pkt[1+b]
+  if num_params > 0'u16:
+    result.parameters = await conn.receiveMetadata(int(num_params))
+  else:
+    result.parameters = newSeq[ColumnDefinition](0)
+  if num_columns > 0'u16:
+    result.columns = await conn.receiveMetadata(int(num_columns))
+
+proc prepStmtBuf(stmt: PreparedStatement, buf: var string, cmd: Command, cap: int = 9) =
+  buf = newStringOfCap(cap)
+  buf.setLen(9)
+  buf[4] = char(cmd)
+  for b in 0..3: buf[b+5] = stmt.statement_id[b]
+
+proc closeStatement(conn: Connection, stmt: PreparedStatement): Future[void] =
+  var buf: string
+  stmt.prepStmtBuf(buf, Command.statementClose)
+  return conn.sendPacket(buf, reset_seq_no=true)
+proc resetStatement(conn: Connection, stmt: PreparedStatement): Future[void] =
+  var buf: string
+  stmt.prepStmtBuf(buf, Command.statementReset)
+  return conn.sendPacket(buf, reset_seq_no=true)
+
+proc formatBoundParams(stmt: PreparedStatement, params: openarray[ParameterBinding]): string =
+  if len(params) != len(stmt.parameters):
+    raise newException(ValueError, "Wrong number of parameters supplied to prepared statement")
+  var approx = 9 + ( (params.len + 7) div 8 )*3
+  for p in params:
+    approx += p.approximatePackedSize()
+  stmt.prepStmtBuf(result, Command.statementExecute, cap = approx)
+  result.putU8(uint8(CursorType.noCursor))
+  result.putU32(1) # "iteration-count" always 1
+  if stmt.parameters.len == 0:
+    return
+  # Compute the null bitmap
+  var ch = 0
+  for p in 0 .. high(stmt.parameters):
+    let bit = p mod 8
+    if bit == 0 and p > 0:
+      result.add(char(ch))
+      ch = 0
+    if params[p].typ == paramNull:
+      ch = ch or ( 1 shl bit )
+  result.add(char(ch))
+  result.add(char(1)) # new-params-bound flag
+  for p in params:
+    p.addTypeUnlessNULL(result)
+  for p in params:
+    p.addValueUnlessNULL(result)
+
+proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[BinaryValue] =
+  let column_count = columns.len
+  let bitmap_len = (column_count + 9) div 8
+  if len(pkt) < (1 + bitmap_len) or pkt[0] != char(0):
+    raise newException(ProtocolError, "Truncated or incorrect binary result row")
+  newSeq(result, column_count)
+  var pos = 1 + bitmap_len
+  for ix in 0 .. column_count-1:
+    # First, check whether this column's bit is set in the null
+    # bitmap. The bitmap is offset by 2, for no apparent reason.
+    let bitmap_index = ix + 2
+    let bitmap_entry = uint8(pkt[ 1 + (bitmap_index div 8) ])
+    if (bitmap_entry and uint8(1 shl (bitmap_index mod 8))) != 0'u8:
+      # This value is NULL
+      result[ix] = BinaryValue(typ: rvtNull)
+    else:
+      let typ = columns[ix].column_type
+      let uns = FieldFlag.unsigned in columns[ix].flags
+      case typ
+      of fieldTypeNull:
+        result[ix] = BinaryValue(typ: rvtNull)
+      of fieldTypeTiny:
+        let v = pkt[pos]
+        inc(pos)
+        let ext = (if uns: int(uint8(v)) else: int(int8(v)))
+        result[ix] = BinaryValue(typ: rvtInteger, intVal: ext)
+      of fieldTypeShort, fieldTypeYear:
+        let v = int(scanU16(pkt, pos))
+        inc(pos, 2)
+        let ext = (if uns or (v <= 32767): v else: 65536 - v)
+        result[ix] = BinaryValue(typ: rvtInteger, intVal: ext)
+      of fieldTypeInt24, fieldTypeLong:
+        let v = scanU32(pkt, pos)
+        inc(pos, 4)
+        var ext: int
+        if not uns and (typ == fieldTypeInt24) and v >= 8388608'u32:
+          ext = 16777216 - int(v)
+        elif not uns and (typ == fieldTypeLong):
+          ext = int( cast[int32](v) ) # rely on 2's-complement reinterpretation here
+        else:
+          ext = int(v)
+        result[ix] = BinaryValue(typ: rvtInteger, intVal: ext)
+      of fieldTypeLongLong:
+        let v = scanU64(pkt, pos)
+        inc(pos, 8)
+        if uns:
+          result[ix] = BinaryValue(typ: rvtULong, uLongVal: v)
+        else:
+          result[ix] = BinaryValue(typ: rvtLong, longVal: cast[int64](v))
+      of fieldTypeFloat, fieldTypeDouble, fieldTypeTime, fieldTypeDate, fieldTypeDateTime, fieldTypeTimestamp:
+        raise newException(SystemError, "Not implemented, TODO")
+      of fieldTypeTinyBlob, fieldTypeMediumBlob, fieldTypeLongBlob, fieldTypeBlob, fieldTypeBit:
+        result[ix] = BinaryValue(typ: rvtBlob, strVal: scanLenStr(pkt, pos))
+      of fieldTypeVarchar, fieldTypeVarString, fieldTypeString, fieldTypeDecimal, fieldTypeNewDecimal:
+        result[ix] = BinaryValue(typ: rvtString, strVal: scanLenStr(pkt, pos))
+      of fieldTypeEnum, fieldTypeSet, fieldTypeGeometry:
+        raise newException(ProtocolError, "Unexpected field type " & $(typ) & " in resultset")
+
+proc execStatement(conn: Connection, stmt: PreparedStatement, params: openarray[ParameterBinding]): Future[void] =
+  var pkt = formatBoundParams(stmt, params)
+  return conn.sendPacket(pkt, reset_seq_no=true)
+
+proc establishUnauthenticatedConnection*(sock: AsyncSocket, username: string, database: string = nil): Future[Connection] {.async.} =
+  result = Connection(socket: sock)
+  block:
+    let pkt = await result.receivePacket()
+    let greet = result.parseInitialGreeting(pkt)
+    await result.writeHandshakeResponse(username, nil, database, nil)
+  let pkt = await result.receivePacket()
+  if isOKPacket(pkt):
+    return
+  elif isERRPacket(pkt):
+    raise parseErrorPacket(pkt)
+  else:
+    raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
+
+proc textQuery*(conn: Connection, query: string): Future[ResultSet[string]] {.async.} =
+  await conn.sendQuery(query)
+  let pkt = await conn.receivePacket()
+  if isOKPacket(pkt):
+    # Success, but no rows returned.
+    result.status = parseOKPacket(conn, pkt)
+    result.columns = @[]
+    result.rows = nil
+  elif isERRPacket(pkt):
+    # Some kind of failure.
+    raise parseErrorPacket(pkt)
+  else:
+    var p = 0
+    let column_count = scanLenInt(pkt, p)
+    result.columns = await conn.receiveMetadata(column_count)
+    var rows: seq[seq[string]]
+    newSeq(rows, 0)
+    while true:
+      let pkt = await conn.receivePacket()
+      if isEOFPacket(pkt):
+        result.status = parseEOFPacket(pkt)
+        break
+      elif isOKPacket(pkt):
+        result.status = parseOKPacket(conn, pkt)
+        break
+      elif isERRPacket(pkt):
+        raise parseErrorPacket(pkt)
+      else:
+        rows.add(parseTextRow(pkt))
+    result.rows = rows
+  return
+
+proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[void]): Future[ResultSet[BinaryValue]] {.async.} =
+  await st
+  let initialPacket = await conn.receivePacket()
+  if isOKPacket(initialPacket):
+    # Success, but no rows returned.
+    result.status = parseOKPacket(conn, initialPacket)
+    result.columns = @[]
+    result.rows = nil
+  elif isERRPacket(initialPacket):
+    # Some kind of failure.
+    raise parseErrorPacket(initialPacket)
+  else:
+    var p = 0
+    let column_count = scanLenInt(initialPacket, p)
+    result.columns = await conn.receiveMetadata(column_count)
+    var rows: seq[seq[BinaryValue]]
+    newSeq(rows, 0)
+    while true:
+      let pkt = await conn.receivePacket()
+      # hexdump(pkt, stdmsg)
+      if isEOFPacket(pkt):
+        result.status = parseEOFPacket(pkt)
+        break
+      elif isERRPacket(pkt):
+        raise parseErrorPacket(pkt)
+      else:
+        rows.add(parseBinaryRow(result.columns, pkt))
+    result.rows = rows
+
+proc preparedQuery*(conn: Connection, stmt: PreparedStatement, params: varargs[ParameterBinding, asParam]): Future[ResultSet[BinaryValue]] =
+  var pkt = formatBoundParams(stmt, params)
+  var sent = conn.sendPacket(pkt, reset_seq_no=true)
+  return performPreparedQuery(conn, stmt, sent)
