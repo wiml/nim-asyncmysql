@@ -358,7 +358,7 @@ proc putLenInt(buf: var string, val: int) =
     buf.add( char(LenEnc_24) )
     buf.add( char( val and 0xFF ) )
     buf.add( char( (val shr 8) and 0xFF ) )
-    buf.add( char( (val shr 24) and 0xFF ) )
+    buf.add( char( (val shr 16) and 0xFF ) )
   else:
     raise newException(ProtocolError, "lenenc-int too long for me!")
 
@@ -497,6 +497,8 @@ proc asParam*(i: uint): ParameterBinding =
     ParameterBinding(typ: paramUInt, uintVal: uint64(i))
   else:
     ParameterBinding(typ: paramInt, intVal: int64(i))
+proc asParam*(i: int64): ParameterBinding =
+  ParameterBinding(typ: paramInt, intVal: i)
 proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVal: if b: 1 else: 0)
 
 proc isNil*(v: ResultValue): bool = v.typ == rvtNull
@@ -802,8 +804,8 @@ proc resetStatement(conn: Connection, stmt: PreparedStatement): Future[void] =
 
 proc formatBoundParams(stmt: PreparedStatement, params: openarray[ParameterBinding]): string =
   if len(params) != len(stmt.parameters):
-    raise newException(ValueError, "Wrong number of parameters supplied to prepared statement")
-  var approx = 9 + ( (params.len + 7) div 8 )*3
+    raise newException(ValueError, "Wrong number of parameters supplied to prepared statement (got " & $len(params) & ", statement expects " & $len(stmt.parameters) & ")")
+  var approx = 14 + ( (params.len + 7) div 8 ) + (params.len * 2)
   for p in params:
     approx += p.approximatePackedSize()
   stmt.prepStmtBuf(result, Command.statementExecute, cap = approx)
@@ -968,3 +970,116 @@ proc preparedQuery*(conn: Connection, stmt: PreparedStatement, params: varargs[P
   var pkt = formatBoundParams(stmt, params)
   var sent = conn.sendPacket(pkt, reset_seq_no=true)
   return performPreparedQuery(conn, stmt, sent)
+
+## ######################################################################
+##
+## Internal tests
+## These don't try to test everything, just basic things and things
+## that won't be exercised by functional testing against a server
+
+
+when isMainModule or defined(test):
+  proc hexstr(s: string): string =
+    result = ""
+    let chs = "0123456789abcdef"
+    for ch in s:
+      let i = int(ch)
+      result.add(chs[ (i and 0xF0) shr 4])
+      result.add(chs[  i and 0x0F ])
+  proc expect(expected: string, got: string) =
+    if expected == got:
+      stdmsg.writeln("OK")
+    else:
+      stdmsg.writeln("FAIL")
+      stdmsg.writeln("    expected: ", expected)
+      stdmsg.writeln("         got: ", got)
+  proc expectint[T](expected: T, got: T): int =
+    if expected == got:
+      return 0
+    stdmsg.write(" ", expected, "!=", got)
+    return 1
+
+  proc test_prim_values() =
+    echo "- Packing/unpacking of primitive types"
+    stdmsg.write("  packing: ")
+    var buf: string = ""
+    putLenInt(buf, 0)
+    putLenInt(buf, 1)
+    putLenInt(buf, 250)
+    putLenInt(buf, 251)
+    putLenInt(buf, 252)
+    putLenInt(buf, 512)
+    putLenInt(buf, 640)
+    putLenInt(buf, 65535)
+    putLenInt(buf, 65536)
+    putLenInt(buf, 15715755)
+    putU32(buf, uint32(65535))
+    putU32(buf, uint32(65536))
+    putU32(buf, 0x80C00AAA'u32)
+    expect("0001fafcfb00fcfc00fc0002fc8002fcfffffd000001fdabcdefffff000000000100aa0ac080", hexstr(buf))
+    stdmsg.write("  unpacking: ")
+    var pos: int = 0
+    var fails: int = 0
+    fails += expectint(0      , scanLenInt(buf, pos))
+    fails += expectint(1      , scanLenInt(buf, pos))
+    fails += expectint(250    , scanLenInt(buf, pos))
+    fails += expectint(251    , scanLenInt(buf, pos))
+    fails += expectint(252    , scanLenInt(buf, pos))
+    fails += expectint(512    , scanLenInt(buf, pos))
+    fails += expectint(640    , scanLenInt(buf, pos))
+    fails += expectint(0x0FFFF, scanLenInt(buf, pos))
+    fails += expectint(0x10000, scanLenInt(buf, pos))
+    fails += expectint(15715755, scanLenInt(buf, pos))
+    fails += expectint(65535, int(scanU32(buf, pos)))
+    fails += expectint(65535'u16, scanU16(buf, pos))
+    fails += expectint(255'u16, scanU16(buf, pos+1))
+    fails += expectint(0'u16, scanU16(buf, pos+2))
+    pos += 4
+    fails += expectint(65536, int(scanU32(buf, pos)))
+    pos += 4
+    fails += expectint(0x80C00AAA, int(scanU32(buf, pos)))
+    pos += 4
+    fails += expectint(0x80C00AAA00010000'u64, scanU64(buf, pos-8))
+    fails += expectint(len(buf), pos)
+    if fails == 0:
+      stdmsg.writeln(" OK")
+    else:
+      stdmsg.writeln(" FAIL")
+
+  proc test_param_pack() =
+    echo "- Testing parameter packing"
+    let dummy_param = ColumnDefinition()
+    var sth: PreparedStatement
+    new(sth)
+    sth.statement_id = ['\0', '\xFF', '\xAA', '\x55' ]
+    sth.parameters = @[dummy_param, dummy_param, dummy_param, dummy_param, dummy_param, dummy_param, dummy_param, dummy_param]
+    stdmsg.write("  packing small numbers, 1: ")
+    let buf = formatBoundParams(sth, [ asParam(0), asParam(1), asParam(127), asParam(128), asParam(255), asParam(256), asParam(-1), asParam(-127) ])
+    expect("000000001700ffaa5500010000000001" &  # packet header
+           "01800180018001800180028001000100" &  # wire type info
+           "00017f80ff0001ff81",                 # packed values
+           hexstr(buf))
+    stdmsg.write("  packing numbers and NULLs: ")
+    sth.parameters = sth.parameters & dummy_param
+    let buf2 = formatBoundParams(sth, [ asParam(-128), asParam(-129), asParam(-255), asParam(nil), asParam(nil), asParam(-256), asParam(-257), asParam(-32768), asParam(nil)  ])
+    expect("000000001700ffaa550001000000180101" &  # packet header
+           "010002000200020002000200" &            # wire type info
+           "807fff01ff00fffffe0080",               # packed values
+           hexstr(buf2))
+
+    stdmsg.write("  more values: ")
+    let buf3 = formatBoundParams(sth, [ asParam("hello"), asParam(nil),
+      asParam(0xFFFF), asParam(0xF1F2F3), asParam(0xFFFFFFFF), asParam(0xFFFFFFFFFF),
+      asParam(-12885), asParam(-2160069290), asParam(low(int64) + 512) ])
+    expect("000000001700ffaa550001000000020001" &  # packet header
+           "fe000280038003800880020008000800"   &  # wire type info
+           "0568656c6c6ffffff3f2f100ffffffffffffffffff000000abcd56f53f7fffffffff0002000000000080",
+           hexstr(buf3))
+
+  proc runInternalTests*() =
+    echo "Running asymcmysql internal tests"
+    test_prim_values()
+    test_param_pack()
+
+  when isMainModule:
+    runInternalTests()
