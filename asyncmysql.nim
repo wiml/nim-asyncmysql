@@ -182,7 +182,7 @@ type
   # This represents a value returned from the server when using
   # the prepared statement / binary protocol. For convenience's sake
   # we combine multiple wire types into the nearest Nim type.
-  ResultValType = enum
+  ResultValueType = enum
     rvtNull,
     rvtInteger,
     rvtLong,
@@ -194,8 +194,8 @@ type
     rvtDateTime,
     rvtString,
     rvtBlob
-  BinaryValue = object
-    case typ: ResultValType
+  ResultValue* = object
+    case typ: ResultValueType
       of rvtInteger:
         intVal: int
       of rvtLong:
@@ -241,8 +241,8 @@ type
     packet_number: uint8              # Next expected seq number (mod-256)
 
     # Information from the connection setup
-    server_version: string
-    thread_id: uint32
+    server_version*: string
+    thread_id*: uint32
     server_caps: set[Cap]
 
     # Other connection parameters
@@ -267,7 +267,7 @@ type
     error_code: uint16
     sqlstate: string
 
-  ColumnDefinition* = object of RootObj
+  ColumnDefinition* = object {.final.}
     catalog*     : string
     schema*      : string
     table*       : string
@@ -499,8 +499,8 @@ proc asParam*(i: uint): ParameterBinding =
     ParameterBinding(typ: paramInt, intVal: int64(i))
 proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVal: if b: 1 else: 0)
 
-proc isNil*(v: BinaryValue): bool = v.typ == rvtNull
-proc `$`*(v: BinaryValue): string =
+proc isNil*(v: ResultValue): bool = v.typ == rvtNull
+proc `$`*(v: ResultValue): string =
   case v.typ
   of rvtNull:
     return "NULL"
@@ -827,7 +827,7 @@ proc formatBoundParams(stmt: PreparedStatement, params: openarray[ParameterBindi
   for p in params:
     p.addValueUnlessNULL(result)
 
-proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[BinaryValue] =
+proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[ResultValue] =
   let column_count = columns.len
   let bitmap_len = (column_count + 9) div 8
   if len(pkt) < (1 + bitmap_len) or pkt[0] != char(0):
@@ -841,23 +841,23 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[BinaryValu
     let bitmap_entry = uint8(pkt[ 1 + (bitmap_index div 8) ])
     if (bitmap_entry and uint8(1 shl (bitmap_index mod 8))) != 0'u8:
       # This value is NULL
-      result[ix] = BinaryValue(typ: rvtNull)
+      result[ix] = ResultValue(typ: rvtNull)
     else:
       let typ = columns[ix].column_type
       let uns = FieldFlag.unsigned in columns[ix].flags
       case typ
       of fieldTypeNull:
-        result[ix] = BinaryValue(typ: rvtNull)
+        result[ix] = ResultValue(typ: rvtNull)
       of fieldTypeTiny:
         let v = pkt[pos]
         inc(pos)
         let ext = (if uns: int(uint8(v)) else: int(int8(v)))
-        result[ix] = BinaryValue(typ: rvtInteger, intVal: ext)
+        result[ix] = ResultValue(typ: rvtInteger, intVal: ext)
       of fieldTypeShort, fieldTypeYear:
         let v = int(scanU16(pkt, pos))
         inc(pos, 2)
         let ext = (if uns or (v <= 32767): v else: 65536 - v)
-        result[ix] = BinaryValue(typ: rvtInteger, intVal: ext)
+        result[ix] = ResultValue(typ: rvtInteger, intVal: ext)
       of fieldTypeInt24, fieldTypeLong:
         let v = scanU32(pkt, pos)
         inc(pos, 4)
@@ -868,20 +868,20 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[BinaryValu
           ext = int( cast[int32](v) ) # rely on 2's-complement reinterpretation here
         else:
           ext = int(v)
-        result[ix] = BinaryValue(typ: rvtInteger, intVal: ext)
+        result[ix] = ResultValue(typ: rvtInteger, intVal: ext)
       of fieldTypeLongLong:
         let v = scanU64(pkt, pos)
         inc(pos, 8)
         if uns:
-          result[ix] = BinaryValue(typ: rvtULong, uLongVal: v)
+          result[ix] = ResultValue(typ: rvtULong, uLongVal: v)
         else:
-          result[ix] = BinaryValue(typ: rvtLong, longVal: cast[int64](v))
+          result[ix] = ResultValue(typ: rvtLong, longVal: cast[int64](v))
       of fieldTypeFloat, fieldTypeDouble, fieldTypeTime, fieldTypeDate, fieldTypeDateTime, fieldTypeTimestamp:
         raise newException(SystemError, "Not implemented, TODO")
       of fieldTypeTinyBlob, fieldTypeMediumBlob, fieldTypeLongBlob, fieldTypeBlob, fieldTypeBit:
-        result[ix] = BinaryValue(typ: rvtBlob, strVal: scanLenStr(pkt, pos))
+        result[ix] = ResultValue(typ: rvtBlob, strVal: scanLenStr(pkt, pos))
       of fieldTypeVarchar, fieldTypeVarString, fieldTypeString, fieldTypeDecimal, fieldTypeNewDecimal:
-        result[ix] = BinaryValue(typ: rvtString, strVal: scanLenStr(pkt, pos))
+        result[ix] = ResultValue(typ: rvtString, strVal: scanLenStr(pkt, pos))
       of fieldTypeEnum, fieldTypeSet, fieldTypeGeometry:
         raise newException(ProtocolError, "Unexpected field type " & $(typ) & " in resultset")
 
@@ -935,7 +935,7 @@ proc textQuery*(conn: Connection, query: string): Future[ResultSet[string]] {.as
     result.rows = rows
   return
 
-proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[void]): Future[ResultSet[BinaryValue]] {.async.} =
+proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[void]): Future[ResultSet[ResultValue]] {.async.} =
   await st
   let initialPacket = await conn.receivePacket()
   if isOKPacket(initialPacket):
@@ -950,7 +950,7 @@ proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[
     var p = 0
     let column_count = scanLenInt(initialPacket, p)
     result.columns = await conn.receiveMetadata(column_count)
-    var rows: seq[seq[BinaryValue]]
+    var rows: seq[seq[ResultValue]]
     newSeq(rows, 0)
     while true:
       let pkt = await conn.receivePacket()
@@ -964,7 +964,7 @@ proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[
         rows.add(parseBinaryRow(result.columns, pkt))
     result.rows = rows
 
-proc preparedQuery*(conn: Connection, stmt: PreparedStatement, params: varargs[ParameterBinding, asParam]): Future[ResultSet[BinaryValue]] =
+proc preparedQuery*(conn: Connection, stmt: PreparedStatement, params: varargs[ParameterBinding, asParam]): Future[ResultSet[ResultValue]] =
   var pkt = formatBoundParams(stmt, params)
   var sent = conn.sendPacket(pkt, reset_seq_no=true)
   return performPreparedQuery(conn, stmt, sent)
