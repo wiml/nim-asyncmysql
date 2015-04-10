@@ -1,6 +1,8 @@
 import asyncmysql, asyncdispatch, asyncnet
 from rawsockets import AF_INET, SOCK_STREAM
 
+import net
+
 proc printResultSet[T](resultSet: ResultSet[T]) =
   if not isNil(resultSet.columns) and resultSet.columns.len > 0:
     for ix in low(resultSet.columns) .. high(resultSet.columns):
@@ -37,10 +39,13 @@ proc blah() {. async .} =
   let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
   await connect(sock, "localhost", Port(3306))
   stdmsg.writeln("(socket connection established)")
-  let conn = await establishUnauthenticatedConnection(sock, "root", database = "mysql")
+  let conn = await establishConnection(sock, "test", database = "test", password = "test_pass")
+  # let conn = await establishConnection(sock, "test", database = "test", password = "test_pass", ssl = newContext(verifyMode = CVerifyPeer))
   stdmsg.writeln("(mysql session established)")
   await conn.demoTextQuery("select * from mysql.user")
   await conn.demoPreparedStatement()
+  #await conn.demoTextQuery("show session variables like '%ssl%'");
+  await conn.demoTextQuery("show session variables like '%version%'");
 
 proc foof() =
   let fut = blah()
@@ -49,3 +54,4 @@ proc foof() =
   stdmsg.writeln("done")
 
 foof()
+

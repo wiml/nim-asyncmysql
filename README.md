@@ -2,7 +2,7 @@ Non-blocking mysql client for Nim
 =================================
 
 This is a scratch-written pure-[Nim][nimlang] implementation of the client
-side of the MySQL database protocol (should also be compatible
+side of the MySQL database protocol (also compatible
 with MariaDB, etc.). It's based on the `asyncdispatch` and
 `asyncnet` modules and should be a fully non-blocking, asynchronous
 library.
@@ -17,10 +17,10 @@ placeholders; send a set of value bindings, get back results
 as various datatypes approximating what the server is
 using).
 
-It currently does not support any kind of authentication, SSL,
-or various other commands that might be useful. It doesn't support
+Other than ordinary queries, it does not support various
+other commands that might be useful. It doesn't support
 old versions of the server (pre-4.1) or probably several other things.
-It is primarily an exercise in learning Nim.
+It was primarily an exercise in learning Nim.
 
 Notes and Deficiencies
 ----------------------
@@ -32,6 +32,15 @@ transaction support.
 
 The API presented by this module is very specific to MySQL. A more
 generic async DB API would be nice.
+
+For password authentication to work, you need a patched version of
+Nim's openssl module which provides access to the EVP_MD API in libcrypto.
+
+For SSL connections to work, you need a patched version of Nim's
+asyncnet module which properly handshakes a ssl-wrapped socket.
+
+For local (unix-domain) connections to work, you would need to extend Nim's
+socket modules to support those.
 
 ### Binary protocol
 

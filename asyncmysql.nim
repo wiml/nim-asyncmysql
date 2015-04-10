@@ -11,6 +11,10 @@
 ##
 
 import strutils, unsigned, asyncnet, asyncdispatch
+import openssl  # Needed for sha1 from libcrypto even if we don't support ssl connections
+
+when defined(ssl):
+  import net  # needed for the SslContext type
 
 # These are protocol constants; see
 #  https://dev.mysql.com/doc/internals/en/overview.html
@@ -222,7 +226,8 @@ type
   ParameterBinding* = object
     ## This represents a value we're sending to the server as a parameter.
     ## Since parameters' types are always sent along with their values,
-    ## we choose the wire type of integers based on the particular value we're sending.
+    ## we choose the wire type of integers based on the particular value
+    ## we're sending each time.
     case typ: ParamBindingType
     of paramNull:
       discard
@@ -593,6 +598,45 @@ type
     scramble: string
     authentication_plugin: string
 
+when declared(openssl.EvpSHA1):
+  # This implements the "mysql_native_password" auth plugin,
+  # which is the only auth we support.
+  proc mysql_native_password_hash(scramble: string, password: string): string =
+    let sha1 = EvpSHA1()
+    let ctx = EvpDigestCtxCreate()
+    proc add(buf: string) = ctx.update(cast[seq[char]](buf))
+    proc add(buf: seq[uint8]) {.inline.} = ctx.update(cast[seq[char]](buf))
+    proc hashfinal(): seq[char] =
+      newSeq(result, EvpDigestSize(sha1))
+      if ctx.final(result[0].addr, nil) == 0:
+        doAssert(false, "EVP_DigestFinal_ex failed")
+      ctx.cleanup()
+
+    block:
+      let ok = ctx.init(sha1, nil)
+      doAssert(ok != 0, "EVP_DigestInit_ex failed")
+    add(password)
+    let phash1 = hashfinal()
+
+    block:
+      let ok = ctx.init(sha1, nil)
+      doAssert(ok != 0, "EVP_DigestInit_ex failed")
+    ctx.update(phash1)
+    let phash2 = hashfinal()
+
+    block:
+      let ok = ctx.init(sha1, nil)
+      doAssert(ok != 0, "EVP_DigestInit_ex failed")
+    add(scramble)
+    ctx.update(phash2)
+    let rhs = hashfinal()
+
+    EvpDigestCtxDestroy(ctx)
+
+    result = newString(len(phash1))
+    for i in 0 .. len(phash1)-1:
+      result[i] = char(uint8(phash1[i]) xor uint8(rhs[i]))
+
 proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
   let protocolVersion = uint8(greeting[0])
   if protocolVersion != HandshakeV10:
@@ -623,7 +667,7 @@ proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
 
 proc writeHandshakeResponse(conn: Connection,
                             username: string,
-                            auth_response: seq[char],
+                            auth_response: string,
                             database: string,
                             auth_plugin: string): Future[void] =
   var buf: string = newStringOfCap(128)
@@ -632,10 +676,10 @@ proc writeHandshakeResponse(conn: Connection,
   var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection }
   if Cap.longFlag in conn.server_caps:
     incl(caps, Cap.longFlag)
-  if not isNil(auth_response):
+  if not isNil(auth_response) and Cap.pluginAuthLenencClientData in conn.server_caps:
     if len(auth_response) > 255:
       incl(caps, Cap.pluginAuthLenencClientData)
-  if not isNil(database):
+  if not isNil(database) and Cap.connectWithDb in conn.server_caps:
     incl(caps, Cap.connectWithDb)
   if not isNil(auth_plugin):
     incl(caps, Cap.pluginAuth)
@@ -891,19 +935,61 @@ proc execStatement(conn: Connection, stmt: PreparedStatement, params: openarray[
   var pkt = formatBoundParams(stmt, params)
   return conn.sendPacket(pkt, reset_seq_no=true)
 
-proc establishUnauthenticatedConnection*(sock: AsyncSocket, username: string, database: string = nil): Future[Connection] {.async.} =
-  result = Connection(socket: sock)
-  block:
-    let pkt = await result.receivePacket()
-    let greet = result.parseInitialGreeting(pkt)
-    await result.writeHandshakeResponse(username, nil, database, nil)
-  let pkt = await result.receivePacket()
+when defined(ssl):
+  proc startTls(conn: Connection, ssl: SslContext): Future[void] {.async.} =
+    # MySQL's equivalent of STARTTLS: we send a sort of stub response
+    # here, do SSL setup, and continue afterwards with the encrypted connection
+    if Cap.ssl notin conn.server_caps:
+      raise newException(ProtocolError, "Server does not support SSL")
+    var buf: string = newStringOfCap(32)
+    buf.setLen(4)
+    var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection, Cap.ssl }
+    putU32(buf, cast[uint32](caps))
+    putU32(buf, 65536'u32)  # max packet size, TODO: what should I put here?
+    buf.add( char(Charset_utf8_ci) )
+    # 23 bytes of filler
+    for i in 1 .. 23:
+      buf.add( char(0) )
+    await conn.sendPacket(buf)
+    # The server will respond with the SSL SERVER_HELLO packet.
+    wrapSocket(ssl, conn.socket, handshake=handshakeAsClient)
+    # and, once the encryption is negotiated, we will continue
+    # with the real handshake response.
+
+proc finishEstablishingConnection(conn: Connection,
+                                  username, password, database: string,
+                                  greet: greetingVars): Future[void] {.async.} =
+  # password authentication
+  when declared(mysql_native_password_hash):
+    let authResponse = (if isNil(password): nil else: mysql_native_password_hash(greet.scramble, password) )
+  else:
+    let authResponse = nil
+  await conn.writeHandshakeResponse(username, authResponse, database, nil)
+
+  # await confirmation from the server
+  let pkt = await conn.receivePacket()
   if isOKPacket(pkt):
     return
   elif isERRPacket(pkt):
     raise parseErrorPacket(pkt)
   else:
     raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
+
+when declared(SslContext) and declared(startTls):
+  proc establishConnection*(sock: AsyncSocket, username: string, password: string = nil, database: string = nil, ssl: SslContext): Future[Connection] {.async.} =
+    result = Connection(socket: sock)
+    let pkt = await result.receivePacket()
+    let greet = result.parseInitialGreeting(pkt)
+
+    # Negotiate encryption
+    await result.startTls(ssl)
+    await result.finishEstablishingConnection(username, password, database, greet)
+
+proc establishConnection*(sock: AsyncSocket, username: string, password: string = nil, database: string = nil): Future[Connection] {.async.} =
+  result = Connection(socket: sock)
+  let pkt = await result.receivePacket()
+  let greet = result.parseInitialGreeting(pkt)
+  await result.finishEstablishingConnection(username, password, database, greet)
 
 proc textQuery*(conn: Connection, query: string): Future[ResultSet[string]] {.async.} =
   await conn.sendQuery(query)
@@ -998,6 +1084,21 @@ when isMainModule or defined(test):
       return 0
     stdmsg.write(" ", expected, "!=", got)
     return 1
+  proc test_native_hash(scramble: string, password: string, expected: string) =
+    let got = mysql_native_password_hash(scramble, password)
+    expect(expected, hexstr(got))
+
+  proc test_hashes() =
+    echo "- Password hashing"
+    # Test vectors captured from tcp traces of official mysql
+    stdmsg.write("  test vec 1: ")
+    test_native_hash("L\\i{NQ09k2W>p<yk/DK+",
+                     "foo",
+                     "f828cd1387160a4c920f6c109d37285d281f7c85")
+    stdmsg.write("  test vec 2: ")
+    test_native_hash("<G.N}OR-(~e^+VQtrao-",
+                     "aaaaaaaaaaaaaaaaaaaabbbbbbbbbb",
+                     "78797fae31fc733107e778ee36e124436761bddc")
 
   proc test_prim_values() =
     echo "- Packing/unpacking of primitive types"
@@ -1077,9 +1178,10 @@ when isMainModule or defined(test):
            hexstr(buf3))
 
   proc runInternalTests*() =
-    echo "Running asymcmysql internal tests"
+    echo "Running asyncmysql internal tests"
     test_prim_values()
     test_param_pack()
+    test_hashes()
 
   when isMainModule:
     runInternalTests()
