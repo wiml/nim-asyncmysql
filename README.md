@@ -33,6 +33,12 @@ transaction support.
 The API presented by this module is very specific to MySQL. A more
 generic async DB API would be nice.
 
+Long packets (more than 2^24-1 bytes) are not handled correctly.
+
+The compressed protocol is not supported--- I'm not sure if this is
+actually a deficiency. As a workaround, SSL with a null cipher and
+compression could be used.
+
 For password authentication to work, you need a patched version of
 Nim's openssl module which provides access to the EVP_MD API in libcrypto.
 
@@ -54,5 +60,7 @@ might not be correct in all circumstances, especially if Nim's int is
 The protocol allows streaming large values to the server (if, for example,
 you are inserting a large BLOB) and this could be implemented elegantly
 as parameter that lazily generates strings.
+
+Cursors, FETCH, and the like are not implemented.
 
 [nimlang]: http://nim-lang.org/
