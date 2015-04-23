@@ -563,10 +563,13 @@ when false:
     let p = cast[ptr array[0 .. 1, char]](data)
     return socket.send(p, len(data))
 else:
-  proc receivePacket(conn:Connection): Future[string] {.async.} =
+  proc receivePacket(conn:Connection, drop_ok: bool = false): Future[string] {.async.} =
     let hdr = await conn.socket.recv(4)
     if len(hdr) == 0:
-      raise newException(ProtocolError, "Connection closed")
+      if drop_ok:
+        return nil
+      else:
+        raise newException(ProtocolError, "Connection closed")
     if len(hdr) != 4:
       raise newException(ProtocolError, "Connection closed unexpectedly")
     let b = cast[ptr array[4,char]](cstring(hdr))
@@ -1056,6 +1059,28 @@ proc preparedQuery*(conn: Connection, stmt: PreparedStatement, params: varargs[P
   var pkt = formatBoundParams(stmt, params)
   var sent = conn.sendPacket(pkt, reset_seq_no=true)
   return performPreparedQuery(conn, stmt, sent)
+
+proc selectDatabase*(conn: Connection, database: string): Future[ResponseOK] {.async.} =
+  var buf: string = newStringOfCap(4 + 1 + len(database))
+  buf.setLen(4)
+  buf.add( char(Command.initDb) )
+  buf.add(database)
+  await conn.sendPacket(buf, reset_seq_no=true)
+  let pkt = await conn.receivePacket()
+  if isERRPacket(pkt):
+    raise parseErrorPacket(pkt)
+  elif isOKPacket(pkt):
+    return parseOKPacket(conn, pkt)
+  else:
+    raise newException(ProtocolError, "unexpected response to COM_INIT_DB")
+
+proc close*(conn: Connection): Future[void] {.async.} =
+  var buf: string = newStringOfCap(5)
+  buf.setLen(4)
+  buf.add( char(Command.quiT) )
+  await conn.sendPacket(buf, reset_seq_no=true)
+  let pkt = await conn.receivePacket(drop_ok=true)
+  conn.socket.close()
 
 ## ######################################################################
 ##
