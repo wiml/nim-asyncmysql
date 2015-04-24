@@ -10,7 +10,8 @@
 ## Copyright (c) 2015 William Lewis
 ##
 
-import strutils, unsigned, asyncnet, asyncdispatch
+import asyncnet, asyncdispatch
+import strutils, unsigned
 import openssl  # Needed for sha1 from libcrypto even if we don't support ssl connections
 
 when defined(ssl):
@@ -504,6 +505,11 @@ proc asParam*(i: uint): ParameterBinding =
     ParameterBinding(typ: paramInt, intVal: int64(i))
 proc asParam*(i: int64): ParameterBinding =
   ParameterBinding(typ: paramInt, intVal: i)
+proc asParam*(i: uint64): ParameterBinding =
+  if i > uint64(high(int)):
+    ParameterBinding(typ: paramUInt, uintVal: i)
+  else:
+    ParameterBinding(typ: paramInt, intVal: int64(i))
 proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVal: if b: 1 else: 0)
 
 proc isNil*(v: ResultValue): bool = v.typ == rvtNull
@@ -900,7 +906,7 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[ResultValu
       of fieldTypeTiny:
         let v = pkt[pos]
         inc(pos)
-        let ext = (if uns: int(uint8(v)) else: int(int8(v)))
+        let ext = (if uns: int(cast[uint8](v)) else: int(cast[int8](v)))
         result[ix] = ResultValue(typ: rvtInteger, intVal: ext)
       of fieldTypeShort, fieldTypeYear:
         let v = int(scanU16(pkt, pos))
