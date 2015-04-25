@@ -148,7 +148,7 @@ proc usage(unopt: string = nil) =
   if not isNil(unopt):
     stdmsg.writeln("Unrecognized argument: ", unopt)
   echo "Usage:"
-  echo paramStr(0), " [-D database] [-h host] [-P portnum] [-u username] [--ssl|--no-ssl]"
+  echo paramStr(0), " [--ssl|--no-ssl] [-v] [-D database] [-h host] [-P portnum] [-u username]"
   echo "\t-D, --database: Perform tests in specified database. (required)"
   echo "\t-h, --host: Connect to server on host. (default: localhost)"
   echo "\t-P, --port: Connect to specified TCP port (default: 3306)"
@@ -161,7 +161,7 @@ proc usage(unopt: string = nil) =
 
 block:
   ## Nim stdlib's parseopt2 doesn't handle standard argument syntax,
-  ## so this is a half-assed attempt to do that. This doesn't handle
+  ## so this is a half-assed attempt to do that.
   var ix = 1
   while (ix+1) <= os.paramCount():
     let param = os.paramStr(ix)
@@ -197,5 +197,7 @@ block:
   if isNil(database_name) or isNil(user_name) or port < 1 or port > 65535:
     usage()
 
+when defined(test):
+  runInternalTests()
 waitFor(runTests())
 echo "Done"
