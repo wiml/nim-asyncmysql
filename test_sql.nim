@@ -42,7 +42,7 @@ proc connTest(): Future[Connection] {.async.} =
   let conn2db2 = await getCurrentDatabase(conn2)
   if conn2db2 != database_name:
     echo "FAIL (db should be: ", database_name, " is: ", conn2db2, ")"
-  echo "Checking TIDs"
+  echo "Checking TIDs (", conn1.thread_id, ", ", conn2.thread_id, ")"
   let rslt = await conn1.textQuery("show processlist");
   var saw_conn1 = false
   var saw_conn2 = false
@@ -59,8 +59,89 @@ proc connTest(): Future[Connection] {.async.} =
   await conn2.close()
   return conn1
 
+template assertEq(T: typedesc, got: expr, expect: expr, msg: string = "incorrect value") =
+  let aa: T = got
+  bind instantiationInfo
+  {.line: instantiationInfo().}:
+    if aa != expect:
+      raiseAssert("assertEq(" & astToStr(got) & ", " & astToStr(expect) & ") failed (got " & repr(aa) & "): " & msg)
+
+proc numberTests(conn: Connection): Future[void] {.async.} =
+  echo "Setting up table for numeric tests..."
+  discard await conn.textQuery("drop table if exists num_tests")
+  discard await conn.textQuery("create table num_tests (s text, u8 tinyint unsigned, s8 tinyint, u int unsigned, i int, b bigint)")
+
+  echo "Testing numeric parameters"
+  # Insert values using the binary protocol
+  let insrow = await conn.prepareStatement("insert into `num_tests` (s, u8, s8, u, i, b) values (?, ?, ?, ?, ?, ?)")
+  discard await conn.preparedQuery(insrow, "one", 1, 1, 1, 1, 1)
+  discard await conn.preparedQuery(insrow, "max", 255, 127, 4294967295, 2147483647, 9223372036854775807'u64)
+  discard await conn.preparedQuery(insrow, "min", 0, -128, 0, -2147483648, (-9223372036854775807'i64 - 1))
+  discard await conn.preparedQuery(insrow, "foo", 128, -127, 256, -32767, -32768)
+  await conn.closeStatement(insrow)
+
+  # Read them back using the text protocol
+  let r1 = await conn.textQuery("select s, u8, s8, u, i, b from num_tests order by u8 asc")
+  assertEq(int, r1.columns.len(), 6, "column count")
+  assertEq(int, r1.rows.len(), 4, "row count")
+  assertEq(string, r1.columns[0].name, "s")
+  assertEq(string, r1.columns[5].name, "b")
+
+  assertEq(seq[string], r1.rows[0],
+    @[ "min", "0", "-128", "0", "-2147483648", "-9223372036854775808" ])
+  assertEq(seq[string], r1.rows[1],
+    @[ "one", "1", "1", "1", "1", "1" ])
+  assertEq(seq[string], r1.rows[2],
+    @[ "foo", "128", "-127", "256", "-32767", "-32768" ])
+  assertEq(seq[string], r1.rows[3],
+    @[ "max", "255", "127", "4294967295", "2147483647", "9223372036854775807" ])
+
+  # Now read them back using the binary protocol
+  echo "Testing numeric results"
+  let rdtab = await conn.prepareStatement("select b, i, u, s, u8, s8 from num_tests order by i desc")
+  let r2 = await conn.preparedQuery(rdtab)
+  assertEq(int, r2.columns.len(), 6, "column count")
+  assertEq(int, r2.rows.len(), 4, "row count")
+  assertEq(string, r2.columns[0].name, "b")
+  assertEq(string, r2.columns[5].name, "s8")
+
+  assertEq(int64,  r2.rows[0][0], 9223372036854775807'i64)
+  assertEq(uint64, r2.rows[0][0], 9223372036854775807'u64)
+  assertEq(int64,  r2.rows[0][1], 2147483647'i64)
+  assertEq(uint64, r2.rows[0][1], 2147483647'u64)
+  assertEq(int,    r2.rows[0][1], 2147483647)
+  assertEq(uint,   r2.rows[0][1], 2147483647'u)
+  assertEq(uint,   r2.rows[0][2], 4294967295'u)
+  assertEq(int64,  r2.rows[0][2], 4294967295'i64)
+  assertEq(uint64, r2.rows[0][2], 4294967295'u64)
+  assertEq(string, r2.rows[0][3], "max")
+  assertEq(int,    r2.rows[0][4], 255)
+  assertEq(int,    r2.rows[0][5], 127)
+
+  assertEq(int,    r2.rows[1][1], 1)
+  assertEq(string, r2.rows[1][3], "one")
+
+  assertEq(int,    r2.rows[2][0], -32768)
+  assertEq(int64,  r2.rows[2][0], -32768'i64)
+  assertEq(int,    r2.rows[2][1], -32767)
+  assertEq(int64,  r2.rows[2][1], -32767'i64)
+  assertEq(int,    r2.rows[2][2], 256)
+  assertEq(string, r2.rows[2][3], "foo")
+  assertEq(int,    r2.rows[2][4], 128)
+  assertEq(int,    r2.rows[2][5], -127)
+  assertEq(int64,  r2.rows[2][5], -127'i64)
+
+  assertEq(int64,  r2.rows[3][0], ( -9223372036854775807'i64 - 1 ))
+  assertEq(int,    r2.rows[3][1], -2147483648)
+  assertEq(int,    r2.rows[3][4], 0)
+  assertEq(int64,  r2.rows[3][4], 0'i64)
+
+  await conn.closeStatement(rdtab)
+  discard await conn.textQuery("drop table `num_tests`")
+
 proc runTests(): Future[void] {.async.} =
   let conn = await connTest()
+  await conn.numberTests()
   await conn.close()
 
 proc usage(unopt: string = nil) =
