@@ -528,6 +528,48 @@ proc `$`*(v: ResultValue): string =
   else:
     return "(unrepresentable!)"
 
+{.push overflowChecks: on .}
+proc toNumber[T](v: ResultValue): T {.inline.} =
+  case v.typ
+  of rvtInteger:
+    return T(v.intVal)
+  of rvtLong:
+    return T(v.longVal)
+  of rvtULong:
+    return T(v.uLongVal)
+  of rvtNull:
+    raise newException(ValueError, "NULL value")
+  else:
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
+
+converter asInt*(v: ResultValue): int8 = return toNumber[int8](v)
+converter asInt*(v: ResultValue): int = return toNumber[int](v)
+converter asInt*(v: ResultValue): uint = return toNumber[uint](v)
+converter asInt*(v: ResultValue): int64 = return toNumber[int64](v)
+converter asInt*(v: ResultValue): uint64 = return toNumber[uint64](v)
+{. pop .}
+
+converter asString*(v: ResultValue): string =
+  case v.typ
+  of rvtNull:
+    return nil
+  of rvtString, rvtBlob:
+    return v.strVal
+  else:
+    raise newException(ValueError, "value is " & $(v.typ) & ", not string")
+converter asBool*(v: ResultValue): bool =
+  case v.typ
+  of rvtInteger:
+    return v.intVal != 0
+  of rvtLong:
+    return v.longVal != 0
+  of rvtULong:
+    return v.uLongVal != 0
+  of rvtNull:
+    raise newException(ValueError, "NULL value")
+  else:
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to boolean")
+
 ## ######################################################################
 ##
 ## MySQL packet packers/unpackers
