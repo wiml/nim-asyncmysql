@@ -846,11 +846,11 @@ proc prepStmtBuf(stmt: PreparedStatement, buf: var string, cmd: Command, cap: in
   buf[4] = char(cmd)
   for b in 0..3: buf[b+5] = stmt.statement_id[b]
 
-proc closeStatement(conn: Connection, stmt: PreparedStatement): Future[void] =
+proc closeStatement*(conn: Connection, stmt: PreparedStatement): Future[void] =
   var buf: string
   stmt.prepStmtBuf(buf, Command.statementClose)
   return conn.sendPacket(buf, reset_seq_no=true)
-proc resetStatement(conn: Connection, stmt: PreparedStatement): Future[void] =
+proc resetStatement*(conn: Connection, stmt: PreparedStatement): Future[void] =
   var buf: string
   stmt.prepStmtBuf(buf, Command.statementReset)
   return conn.sendPacket(buf, reset_seq_no=true)
