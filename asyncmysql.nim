@@ -9,9 +9,9 @@
 ##
 ## Copyright (c) 2015 William Lewis
 ##
-
+{.experimental: "notnil".}
 import asyncnet, asyncdispatch
-import strutils, unsigned
+import strutils#, unsigned
 import openssl  # Needed for sha1 from libcrypto even if we don't support ssl connections
 
 when defined(ssl):
@@ -230,14 +230,14 @@ type
     ## we choose the wire type of integers based on the particular value
     ## we're sending each time.
     case typ: ParamBindingType
-    of paramNull:
-      discard
-    of paramString, paramBlob:
-      strVal: string not nil
-    of paramInt:
-      intVal: int64
-    of paramUInt:
-      uintVal: uint64
+      of paramNull:
+        discard
+      of paramString, paramBlob:
+        strVal: string# not nil
+      of paramInt:
+        intVal: int64
+      of paramUInt:
+        uintVal: uint64
 
 type
   nat24 = range[0 .. 16777215]
@@ -269,7 +269,7 @@ type
     # session_state_changes: seq[ ... ]
 
   # Server response packet: ERR (which can be thrown as an exception)
-  ResponseERR = object of SystemError
+  ResponseERR = object of CatchableError
     error_code: uint16
     sqlstate: string
 
@@ -311,6 +311,7 @@ proc add(s: var string, a: seq[char]) =
 
 proc scanU32(buf: string, pos: int): uint32 =
   result = uint32(buf[pos]) + `shl`(uint32(buf[pos+1]), 8'u32) + (uint32(buf[pos+2]) shl 16'u32) + (uint32(buf[pos+3]) shl 24'u32)
+
 proc putU32(buf: var string, val: uint32) =
   buf.add( char( val and 0xff ) )
   buf.add( char( (val shr 8)  and 0xff ) )
@@ -332,9 +333,10 @@ proc scanU64(buf: string, pos: int): uint64 =
   let l32 = scanU32(buf, pos)
   let h32 = scanU32(buf, pos+4)
   return uint64(l32) + ( (uint64(h32) shl 32 ) )
+
 proc putS64(buf: var string, val: int64) =
   let compl: uint64 = cast[uint64](val)
-  buf.putU32(uint32(compl and 0xFFFFFFFF))
+  buf.putU32(uint32(compl and 0xFFFFFFFF'u64))
   buf.putU32(uint32(compl shr 32))
 
 proc scanLenInt(buf: string, pos: var int): int =
@@ -351,6 +353,7 @@ proc scanLenInt(buf: string, pos: var int): int =
     pos = pos + 4
     return
   return -1
+
 proc putLenInt(buf: var string, val: int) =
   if val < 0:
     raise newException(ProtocolError, "trying to send a negative lenenc-int")
@@ -381,6 +384,7 @@ proc scanNulStringX(buf: string, pos: var int): string =
     result.add(buf[pos])
     inc(pos)
   inc(pos)
+
 proc putNulString(buf: var string, val: string) =
   buf.add(val)
   buf.add( char(0) )
@@ -391,6 +395,7 @@ proc scanLenStr(buf: string, pos: var int): string =
     raise newException(ProtocolError, "lenenc-int: is 0x" & toHex(int(buf[pos]), 2))
   result = substr(buf, pos, pos+slen-1)
   pos = pos + slen
+
 proc putLenStr(buf: var string, val: string) =
   putLenInt(buf, val.len)
   buf.add(val)
@@ -411,9 +416,6 @@ proc hexdump(buf: openarray[char], fp: File) =
       fp.write(ch)
     pos += 16
     fp.write("|\n")
-proc hexdump(s: string, fp: File) =
-  # sigh, why can't I pass a string to an openarray[char] parameter?
-  hexdump( cast[seq[char]](s), fp )
 
 
 ## ######################################################################
@@ -468,7 +470,7 @@ proc addValueUnlessNULL(p: ParameterBinding, pkt: var string) =
       if p.intVal >= 256:
         pkt.putU8((p.intVal shr 8) and 0xFF)
         if p.intVal >= 65536:
-          pkt.putU16((p.intVal shr 16) and 0xFFFF)
+          pkt.putU16( (p.intVal shr 16).uint16 and 0xFFFF'u16)
           if p.intVal >= (65536'i64 * 65536'i64):
             pkt.putU32(uint32(p.intVal shr 32))
     else:
@@ -497,22 +499,28 @@ proc asParam*(s: string): ParameterBinding =
     ParameterBinding(typ: paramNull)
   else:
     ParameterBinding(typ: paramString, strVal: s)
+
 proc asParam*(i: int): ParameterBinding = ParameterBinding(typ: paramInt, intVal: i)
+
 proc asParam*(i: uint): ParameterBinding =
   if i > uint(high(int)):
     ParameterBinding(typ: paramUInt, uintVal: uint64(i))
   else:
     ParameterBinding(typ: paramInt, intVal: int64(i))
+
 proc asParam*(i: int64): ParameterBinding =
   ParameterBinding(typ: paramInt, intVal: i)
+
 proc asParam*(i: uint64): ParameterBinding =
   if i > uint64(high(int)):
     ParameterBinding(typ: paramUInt, uintVal: i)
   else:
     ParameterBinding(typ: paramInt, intVal: int64(i))
+
 proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVal: if b: 1 else: 0)
 
-proc isNil*(v: ResultValue): bool = v.typ == rvtNull
+proc isNil*(v: ResultValue): bool {.inline.} = v.typ == rvtNull
+
 proc `$`*(v: ResultValue): string =
   case v.typ
   of rvtNull:
@@ -542,11 +550,11 @@ proc toNumber[T](v: ResultValue): T {.inline.} =
   else:
     raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
 
-converter asInt*(v: ResultValue): int8 = return toNumber[int8](v)
-converter asInt*(v: ResultValue): int = return toNumber[int](v)
-converter asInt*(v: ResultValue): uint = return toNumber[uint](v)
-converter asInt*(v: ResultValue): int64 = return toNumber[int64](v)
-converter asInt*(v: ResultValue): uint64 = return toNumber[uint64](v)
+converter asInt*[T](v: ResultValue): T = return toNumber[T](v)
+# converter asInt*(v: ResultValue): int = return toNumber[int](v)
+# converter asInt*(v: ResultValue): uint = return toNumber[uint](v)
+# converter asInt*(v: ResultValue): int64 = return toNumber[int64](v)
+# converter asInt*(v: ResultValue): uint64 = return toNumber[uint64](v)
 {. pop .}
 
 converter asString*(v: ResultValue): string =
@@ -557,6 +565,7 @@ converter asString*(v: ResultValue): string =
     return v.strVal
   else:
     raise newException(ValueError, "value is " & $(v.typ) & ", not string")
+
 converter asBool*(v: ResultValue): bool =
   case v.typ
   of rvtInteger:
@@ -577,7 +586,7 @@ converter asBool*(v: ResultValue): bool =
 proc processHeader(c: Connection, hdr: array[4, char]): nat24 =
   result = int32(hdr[0]) + int32(hdr[1])*256 + int32(hdr[2])*65536
   let pnum = uint8(hdr[3])
-  # stdmsg.writeln("plen=", result, ", pnum=", pnum, " (expecting ", c.packet_number, ")")
+  # stdmsg.writeLine("plen=", result, ", pnum=", pnum, " (expecting ", c.packet_number, ")")
   if pnum != c.packet_number:
     raise newException(ProtocolError, "Bad packet number (got sequence number " & $(pnum) & ", expected " & $(c.packet_number) & ")")
   c.packet_number += 1
@@ -649,7 +658,7 @@ type
     scramble: string
     authentication_plugin: string
 
-when declared(openssl.EvpSHA1):
+when declared(openssl.EvpSHA1) and declared(EvpDigestCtxCreate):
   # This implements the "mysql_native_password" auth plugin,
   # which is the only auth we support.
   proc mysql_native_password_hash(scramble: string, password: string): string =
@@ -974,7 +983,7 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[ResultValu
         else:
           result[ix] = ResultValue(typ: rvtLong, longVal: cast[int64](v))
       of fieldTypeFloat, fieldTypeDouble, fieldTypeTime, fieldTypeDate, fieldTypeDateTime, fieldTypeTimestamp:
-        raise newException(SystemError, "Not implemented, TODO")
+        raise newException(Exception, "Not implemented, TODO")
       of fieldTypeTinyBlob, fieldTypeMediumBlob, fieldTypeLongBlob, fieldTypeBlob, fieldTypeBit:
         result[ix] = ResultValue(typ: rvtBlob, strVal: scanLenStr(pkt, pos))
       of fieldTypeVarchar, fieldTypeVarString, fieldTypeString, fieldTypeDecimal, fieldTypeNewDecimal:
@@ -1014,7 +1023,7 @@ proc finishEstablishingConnection(conn: Connection,
   when declared(mysql_native_password_hash):
     let authResponse = (if isNil(password): nil else: mysql_native_password_hash(greet.scramble, password) )
   else:
-    let authResponse = nil
+    var authResponse:string
   await conn.writeHandshakeResponse(username, authResponse, database, nil)
 
   # await confirmation from the server
@@ -1147,31 +1156,32 @@ when isMainModule or defined(test):
       result.add(chs[  i and 0x0F ])
   proc expect(expected: string, got: string) =
     if expected == got:
-      stdmsg.writeln("OK")
+      stdmsg.writeLine("OK")
     else:
-      stdmsg.writeln("FAIL")
-      stdmsg.writeln("    expected: ", expected)
-      stdmsg.writeln("         got: ", got)
+      stdmsg.writeLine("FAIL")
+      stdmsg.writeLine("    expected: ", expected)
+      stdmsg.writeLine("         got: ", got)
   proc expectint[T](expected: T, got: T): int =
     if expected == got:
       return 0
     stdmsg.write(" ", expected, "!=", got)
     return 1
-  proc test_native_hash(scramble: string, password: string, expected: string) =
-    let got = mysql_native_password_hash(scramble, password)
-    expect(expected, hexstr(got))
+  when declared(openssl.EvpSHA1) and declared(EvpDigestCtxCreate):
+    proc test_native_hash(scramble: string, password: string, expected: string) =
+      let got = mysql_native_password_hash(scramble, password)
+      expect(expected, hexstr(got))
 
-  proc test_hashes() =
-    echo "- Password hashing"
-    # Test vectors captured from tcp traces of official mysql
-    stdmsg.write("  test vec 1: ")
-    test_native_hash("L\\i{NQ09k2W>p<yk/DK+",
-                     "foo",
-                     "f828cd1387160a4c920f6c109d37285d281f7c85")
-    stdmsg.write("  test vec 2: ")
-    test_native_hash("<G.N}OR-(~e^+VQtrao-",
-                     "aaaaaaaaaaaaaaaaaaaabbbbbbbbbb",
-                     "78797fae31fc733107e778ee36e124436761bddc")
+    proc test_hashes() =
+      echo "- Password hashing"
+      # Test vectors captured from tcp traces of official mysql
+      stdmsg.write("  test vec 1: ")
+      test_native_hash("L\\i{NQ09k2W>p<yk/DK+",
+                      "foo",
+                      "f828cd1387160a4c920f6c109d37285d281f7c85")
+      stdmsg.write("  test vec 2: ")
+      test_native_hash("<G.N}OR-(~e^+VQtrao-",
+                      "aaaaaaaaaaaaaaaaaaaabbbbbbbbbb",
+                      "78797fae31fc733107e778ee36e124436761bddc")
 
   proc test_prim_values() =
     echo "- Packing/unpacking of primitive types"
@@ -1216,9 +1226,9 @@ when isMainModule or defined(test):
     fails += expectint(0x80C00AAA00010000'u64, scanU64(buf, pos-8))
     fails += expectint(len(buf), pos)
     if fails == 0:
-      stdmsg.writeln(" OK")
+      stdmsg.writeLine(" OK")
     else:
-      stdmsg.writeln(" FAIL")
+      stdmsg.writeLine(" FAIL")
 
   proc test_param_pack() =
     echo "- Testing parameter packing"
@@ -1254,7 +1264,8 @@ when isMainModule or defined(test):
     echo "Running asyncmysql internal tests"
     test_prim_values()
     test_param_pack()
-    test_hashes()
+    when declared(openssl.EvpSHA1) and declared(EvpDigestCtxCreate):
+      test_hashes()
 
   when isMainModule:
     runInternalTests()
