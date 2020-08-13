@@ -10,7 +10,7 @@
 ## Copyright (c) 2015 William Lewis
 ##
 {.experimental: "notnil".}
-import asyncnet, asyncdispatch
+import asyncnet, asyncdispatch,std/sha1
 import strutils#, unsigned
 import openssl  # Needed for sha1 from libcrypto even if we don't support ssl connections
 
@@ -1017,6 +1017,20 @@ when defined(ssl):
     # and, once the encryption is negotiated, we will continue
     # with the real handshake response.
 
+proc sha1(seed: string): string =
+  const len = 20
+  result = newString(len)
+  let s = secureHash(seed)
+  let da = Sha1Digest(s)
+  for i in 0..<len:
+    result[i] = chr(da[i])
+
+proc token(scrambleBuff: string, password: string): string =
+  let stage1 = sha1(password)
+  let stage2 = sha1(stage1)
+  let stage3 = sha1(scrambleBuff & stage2)
+  result = stage3 xor stage1
+
 proc finishEstablishingConnection(conn: Connection,
                                   username, password, database: string,
                                   greet: greetingVars): Future[void] {.async.} =
@@ -1024,7 +1038,7 @@ proc finishEstablishingConnection(conn: Connection,
   when declared(mysql_native_password_hash):
     let authResponse = (if isNil(password): nil else: mysql_native_password_hash(greet.scramble, password) )
   else:
-    var authResponse:string
+    var authResponse = token(greet.scramble, password)
   await conn.writeHandshakeResponse(username, authResponse, database, "")
 
   # await confirmation from the server
