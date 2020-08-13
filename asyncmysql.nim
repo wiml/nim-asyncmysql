@@ -495,10 +495,10 @@ proc approximatePackedSize(p: ParameterBinding): int {.inline.} =
     return 4
 
 proc asParam*(s: string): ParameterBinding =
-  if isNil(s):
-    ParameterBinding(typ: paramNull)
-  else:
-    ParameterBinding(typ: paramString, strVal: s)
+  # if isNil(s):
+  #   ParameterBinding(typ: paramNull)
+  # else:
+  ParameterBinding(typ: paramString, strVal: s)
 
 proc asParam*(i: int): ParameterBinding = ParameterBinding(typ: paramInt, intVal: i)
 
@@ -536,6 +536,7 @@ proc `$`*(v: ResultValue): string =
   else:
     return "(unrepresentable!)"
 
+
 {.push overflowChecks: on .}
 proc toNumber[T](v: ResultValue): T {.inline.} =
   case v.typ
@@ -550,17 +551,17 @@ proc toNumber[T](v: ResultValue): T {.inline.} =
   else:
     raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
 
-converter asInt*[T](v: ResultValue): T = return toNumber[T](v)
-# converter asInt*(v: ResultValue): int = return toNumber[int](v)
-# converter asInt*(v: ResultValue): uint = return toNumber[uint](v)
-# converter asInt*(v: ResultValue): int64 = return toNumber[int64](v)
-# converter asInt*(v: ResultValue): uint64 = return toNumber[uint64](v)
+converter asInt8*(v: ResultValue): int8 = return toNumber[int8](v)
+converter asInt*(v: ResultValue): int = return toNumber[int](v)
+converter asUInt*(v: ResultValue): uint = return toNumber[uint](v)
+converter asInt64*(v: ResultValue): int64 = return toNumber[int64](v)
+converter asUint64*(v: ResultValue): uint64 = return toNumber[uint64](v)
 {. pop .}
 
 converter asString*(v: ResultValue): string =
   case v.typ
   of rvtNull:
-    return nil
+    return ""
   of rvtString, rvtBlob:
     return v.strVal
   else:
@@ -624,7 +625,7 @@ else:
     let hdr = await conn.socket.recv(4)
     if len(hdr) == 0:
       if drop_ok:
-        return nil
+        return ""
       else:
         raise newException(ProtocolError, "Connection closed")
     if len(hdr) != 4:
@@ -736,12 +737,12 @@ proc writeHandshakeResponse(conn: Connection,
   var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection }
   if Cap.longFlag in conn.server_caps:
     incl(caps, Cap.longFlag)
-  if not isNil(auth_response) and Cap.pluginAuthLenencClientData in conn.server_caps:
+  if auth_response.len > 0 and Cap.pluginAuthLenencClientData in conn.server_caps:
     if len(auth_response) > 255:
       incl(caps, Cap.pluginAuthLenencClientData)
-  if not isNil(database) and Cap.connectWithDb in conn.server_caps:
+  if database.len > 0 and Cap.connectWithDb in conn.server_caps:
     incl(caps, Cap.connectWithDb)
-  if not isNil(auth_plugin):
+  if auth_plugin.len > 0:
     incl(caps, Cap.pluginAuth)
 
   conn.client_caps = caps
@@ -759,7 +760,7 @@ proc writeHandshakeResponse(conn: Connection,
   putNulString(buf, username)
 
   # Authentication data
-  if not isNil(auth_response):
+  if auth_response.len > 0:
     if Cap.pluginAuthLenencClientData in caps:
       putLenInt(buf, len(auth_response))
       buf.add(auth_response)
@@ -817,7 +818,7 @@ proc parseTextRow(pkt: string): seq[string] =
   result = newSeq[string]()
   while pos < len(pkt):
     if pkt[pos] == NullColumn:
-      result.add(nil)
+      result.add("")
       inc(pos)
     else:
       result.add(pkt.scanLenStr(pos))
@@ -1024,7 +1025,7 @@ proc finishEstablishingConnection(conn: Connection,
     let authResponse = (if isNil(password): nil else: mysql_native_password_hash(greet.scramble, password) )
   else:
     var authResponse:string
-  await conn.writeHandshakeResponse(username, authResponse, database, nil)
+  await conn.writeHandshakeResponse(username, authResponse, database, "")
 
   # await confirmation from the server
   let pkt = await conn.receivePacket()
@@ -1036,7 +1037,7 @@ proc finishEstablishingConnection(conn: Connection,
     raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
 
 when declared(SslContext) and declared(startTls):
-  proc establishConnection*(sock: AsyncSocket, username: string, password: string = nil, database: string = nil, ssl: SslContext): Future[Connection] {.async.} =
+  proc establishConnection*(sock: AsyncSocket, username: string, password: string = "", database: string = "", ssl: SslContext): Future[Connection] {.async.} =
     result = Connection(socket: sock)
     let pkt = await result.receivePacket()
     let greet = result.parseInitialGreeting(pkt)
@@ -1045,7 +1046,7 @@ when declared(SslContext) and declared(startTls):
     await result.startTls(ssl)
     await result.finishEstablishingConnection(username, password, database, greet)
 
-proc establishConnection*(sock: AsyncSocket, username: string, password: string = nil, database: string = nil): Future[Connection] {.async.} =
+proc establishConnection*(sock: AsyncSocket, username: string, password: string = "", database: string = ""): Future[Connection] {.async.} =
   result = Connection(socket: sock)
   let pkt = await result.receivePacket()
   let greet = result.parseInitialGreeting(pkt)
@@ -1058,7 +1059,7 @@ proc textQuery*(conn: Connection, query: string): Future[ResultSet[string]] {.as
     # Success, but no rows returned.
     result.status = parseOKPacket(conn, pkt)
     result.columns = @[]
-    result.rows = nil
+    result.rows = @[]
   elif isERRPacket(pkt):
     # Some kind of failure.
     raise parseErrorPacket(pkt)
@@ -1090,7 +1091,7 @@ proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[
     # Success, but no rows returned.
     result.status = parseOKPacket(conn, initialPacket)
     result.columns = @[]
-    result.rows = nil
+    result.rows = @[]
   elif isERRPacket(initialPacket):
     # Some kind of failure.
     raise parseErrorPacket(initialPacket)

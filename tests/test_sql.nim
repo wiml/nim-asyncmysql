@@ -1,22 +1,23 @@
-import asyncmysql, asyncdispatch, asyncnet, os, parseutils
-from rawsockets import AF_INET, SOCK_STREAM
-
+import ../asyncmysql, asyncdispatch, asyncnet, os, parseutils
+from nativesockets import AF_INET, SOCK_STREAM
+import unittest
 import net
 
-var database_name: string
-var port: int = 3306
-var host_name: string = "localhost"
-var user_name: string
-var pass_word: string
-var ssl: bool = false
-var verbose: bool = false
+const database_name = "test"
+const port: int = 3306
+const host_name = "localhost"
+const user_name = "mysql"
+const pass_word = "123456"
+const ssl: bool = false
+const verbose: bool = false
 
-proc doTCPConnect(dbn: string = nil): Future[Connection] {.async.} =
+proc doTCPConnect(dbn: string = ""): Future[Connection] {.async.} =
   let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
   await connect(sock, host_name, Port(port))
   if ssl:
-    let ctx = newContext(verifyMode = CVerifyPeer)
-    return await establishConnection(sock, user_name, database=dbn, password = pass_word, ssl=ctx)
+    when defined(ssl):
+      let ctx = newContext(verifyMode = CVerifyPeer)
+      return await establishConnection(sock, user_name, database=dbn, password = pass_word, ssl=ctx)
   else:
     return await establishConnection(sock, user_name, database=dbn, password = pass_word)
 
@@ -36,7 +37,7 @@ proc connTest(): Future[Connection] {.async.} =
   echo "Connecting (without initial db)"
   let conn2 = await doTCPConnect()
   let conn2db1 = await getCurrentDatabase(conn2)
-  if not isNil(conn2db1):
+  if conn2db1.len > 0:
     echo "FAIL (db should be NULL, is: ", $conn2db1, ")"
   discard await conn2.selectDatabase(database_name)
   let conn2db2 = await getCurrentDatabase(conn2)
@@ -59,12 +60,8 @@ proc connTest(): Future[Connection] {.async.} =
   await conn2.close()
   return conn1
 
-template assertEq(T: typedesc, got: expr, expect: expr, msg: string = "incorrect value") =
-  let aa: T = got
-  bind instantiationInfo
-  {.line: instantiationInfo().}:
-    if aa != expect:
-      raiseAssert("assertEq(" & astToStr(got) & ", " & astToStr(expect) & ") failed (got " & repr(aa) & "): " & msg)
+template assertEq(T: typedesc, got: untyped, expect: untyped, msg: string = "incorrect value") =
+  check got == expect
 
 proc numberTests(conn: Connection): Future[void] {.async.} =
   echo "Setting up table for numeric tests..."
@@ -143,59 +140,6 @@ proc runTests(): Future[void] {.async.} =
   let conn = await connTest()
   await conn.numberTests()
   await conn.close()
-
-proc usage(unopt: string = nil) =
-  if not isNil(unopt):
-    stdmsg.writeln("Unrecognized argument: ", unopt)
-  echo "Usage:"
-  echo paramStr(0), " [--ssl|--no-ssl] [-v] [-D database] [-h host] [-P portnum] [-u username]"
-  echo "\t-D, --database: Perform tests in specified database. (required)"
-  echo "\t-h, --host: Connect to server on host. (default: localhost)"
-  echo "\t-P, --port: Connect to specified TCP port (default: 3306)"
-  echo "\t-u, --username: Connect as specified username (required)"
-  echo "\t--ssl, --no-ssl: Enable ssl/tls (default: cleartext)"
-  echo "\t-v: More verbose output"
-  echo "The user must have the ability to create and drop tables in the"
-  echo "database, as well as the usual select and insert privileges."
-  quit(QuitFailure)
-
-block:
-  ## Nim stdlib's parseopt2 doesn't handle standard argument syntax,
-  ## so this is a half-assed attempt to do that.
-  var ix = 1
-  while (ix+1) <= os.paramCount():
-    let param = os.paramStr(ix)
-    inc(ix)
-    case param
-    of "--database", "-D":
-      database_name = os.paramStr(ix)
-      inc(ix)
-    of "--host", "-h":
-      host_name = os.paramStr(ix)
-      inc(ix)
-    of "--port", "-P":
-      let val = os.paramStr(ix)
-      inc(ix)
-      if parseInt(val, port, 0) != len(val):
-        usage()
-    of "--user", "-u":
-      user_name = os.paramStr(ix)
-      inc(ix)
-    of "--password", "-p":
-      pass_word = os.paramStr(ix)
-      inc(ix)
-    of "--ssl":
-      ssl = true
-    of "--no-ssl":
-      ssl = false
-    of "-v", "--verbose":
-      verbose = true
-    else:
-      usage(param)
-  if ix != os.paramCount()+1:
-    usage()
-  if isNil(database_name) or isNil(user_name) or port < 1 or port > 65535:
-    usage()
 
 when defined(test):
   runInternalTests()
