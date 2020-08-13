@@ -1017,6 +1017,13 @@ when defined(ssl):
     # and, once the encryption is negotiated, we will continue
     # with the real handshake response.
 
+proc `xor`(a: string, b: string): string =
+  assert a.len == b.len
+  result = newStringOfCap(a.len)
+  for i in 0..<a.len:
+    let c = ord(a[i]) xor ord(b[i])
+    add(result, chr(c))
+
 proc sha1(seed: string): string =
   const len = 20
   result = newString(len)
