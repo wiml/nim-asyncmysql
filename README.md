@@ -1,4 +1,5 @@
-Non-blocking mysql client for Nim
+Non-blocking mysql client for Nim [![Build Status](https://travis-ci.org/wiml/nim-asyncmysql.svg?branch=master)](https://travis-ci.org/wiml/nim-asyncmysql)  
+
 =================================
 
 This is a scratch-written pure-[Nim][nimlang] implementation of the client
