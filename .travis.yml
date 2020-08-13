@@ -29,7 +29,7 @@ before_script:
     fi
   - mysql -h 127.0.0.1 -u root -e "create database if not exists test;"
   - mysql -h 127.0.0.1 -u root -e "create user 'mysql'@'127.0.0.1' identified by '123456';"
-  - mysql -h 127.0.0.1 -u root -e "grant all on *.* to 'mysql'@'127.0.0.1' identified by '123456';"
+  - mysql -h 127.0.0.1 -u root -e "grant all on *.* to 'mysql'@'127.0.0.1';"
   # - mysql -h 127.0.0.1 -u root -e "create user 'mysql2'@'127.0.0.1' identified by '123456';"
   # - mysql -h 127.0.0.1 -u root -e "grant all on *.* to 'mysql2'@'127.0.0.1';"
 
