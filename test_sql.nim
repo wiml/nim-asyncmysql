@@ -1,7 +1,8 @@
 import asyncmysql, asyncdispatch, asyncnet, os, parseutils
-from rawsockets import AF_INET, SOCK_STREAM
+from nativesockets import AF_INET, SOCK_STREAM
 
 import net
+import strutils
 
 var database_name: string
 var port: int = 3306
@@ -11,16 +12,19 @@ var pass_word: string
 var ssl: bool = false
 var verbose: bool = false
 
-proc doTCPConnect(dbn: string = nil): Future[Connection] {.async.} =
+proc doTCPConnect(dbn: string = ""): Future[Connection] {.async.} =
   let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
   await connect(sock, host_name, Port(port))
-  if ssl:
-    let ctx = newContext(verifyMode = CVerifyPeer)
-    return await establishConnection(sock, user_name, database=dbn, password = pass_word, ssl=ctx)
+  if sock.isNil:
+    raise newException(ValueError, "nil socket")
   else:
-    return await establishConnection(sock, user_name, database=dbn, password = pass_word)
+    if ssl:
+      let ctx = newContext(verifyMode = CVerifyPeer)
+      return await establishConnection(sock, user_name, database=dbn, password = pass_word, sslHostname = host_name, ssl=ctx)
+    else:
+      return await establishConnection(sock, user_name, database=dbn, password = pass_word)
 
-proc getCurrentDatabase(conn: Connection): Future[string] {.async.} =
+proc getCurrentDatabase(conn: Connection): Future[ResultString] {.async.} =
   let rslt = await conn.textQuery("select database()")
   doAssert(len(rslt.columns) == 1, "wrong number of result columns")
   doAssert(len(rslt.rows) == 1, "wrong number of result rows")
@@ -59,12 +63,23 @@ proc connTest(): Future[Connection] {.async.} =
   await conn2.close()
   return conn1
 
-template assertEq(T: typedesc, got: expr, expect: expr, msg: string = "incorrect value") =
+template assertEq(T: typedesc, got: untyped, expect: untyped, msg: string = "incorrect value") =
   let aa: T = got
   bind instantiationInfo
   {.line: instantiationInfo().}:
     if aa != expect:
       raiseAssert("assertEq(" & astToStr(got) & ", " & astToStr(expect) & ") failed (got " & repr(aa) & "): " & msg)
+
+template assertEqrs(got: untyped, expect: varargs[ResultString, asResultString]) =
+  bind instantiationInfo
+  let aa: seq[ResultString] = got
+  let count = aa.len
+  {.line: instantiationInfo().}:
+    if count != expect.len:
+      raiseAssert(format("assertEqrs($1, ...) failed (got $2 columns, expected $3)", astToStr(got), count, aa.len))
+    for col in 0 .. high(aa):
+      if aa[col] != expect[col]:
+        raiseAssert(format("assertEqrs($1, $2) failed (mismatch at index $3)", astToStr(got), expect, col))
 
 proc numberTests(conn: Connection): Future[void] {.async.} =
   echo "Setting up table for numeric tests..."
@@ -87,14 +102,10 @@ proc numberTests(conn: Connection): Future[void] {.async.} =
   assertEq(string, r1.columns[0].name, "s")
   assertEq(string, r1.columns[5].name, "b")
 
-  assertEq(seq[string], r1.rows[0],
-    @[ "min", "0", "-128", "0", "-2147483648", "-9223372036854775808" ])
-  assertEq(seq[string], r1.rows[1],
-    @[ "one", "1", "1", "1", "1", "1" ])
-  assertEq(seq[string], r1.rows[2],
-    @[ "foo", "128", "-127", "256", "-32767", "-32768" ])
-  assertEq(seq[string], r1.rows[3],
-    @[ "max", "255", "127", "4294967295", "2147483647", "9223372036854775807" ])
+  assertEqrs(r1.rows[0], "min", "0", "-128", "0", "-2147483648", "-9223372036854775808")
+  assertEqrs(r1.rows[1], "one", "1", "1", "1", "1", "1")
+  assertEqrs(r1.rows[2], "foo", "128", "-127", "256", "-32767", "-32768")
+  assertEqrs(r1.rows[3], "max", "255", "127", "4294967295", "2147483647", "9223372036854775807")
 
   # Now read them back using the binary protocol
   echo "Testing numeric results"
@@ -144,9 +155,9 @@ proc runTests(): Future[void] {.async.} =
   await conn.numberTests()
   await conn.close()
 
-proc usage(unopt: string = nil) =
-  if not isNil(unopt):
-    stdmsg.writeln("Unrecognized argument: ", unopt)
+proc usage(unopt: string = "") =
+  if unopt.len > 0:
+    stdmsg.writeLine("Unrecognized argument: ", unopt)
   echo "Usage:"
   echo paramStr(0), " [--ssl|--no-ssl] [-v] [-D database] [-h host] [-P portnum] [-u username]"
   echo "\t-D, --database: Perform tests in specified database. (required)"
@@ -194,7 +205,7 @@ block:
       usage(param)
   if ix != os.paramCount()+1:
     usage()
-  if isNil(database_name) or isNil(user_name) or port < 1 or port > 65535:
+  if database_name.len == 0 or user_name.len == 0 or port < 1 or port > 65535:
     usage()
 
 when defined(test):

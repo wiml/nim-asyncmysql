@@ -1,10 +1,12 @@
+{.experimental: "notnil".}
+
 import asyncmysql, asyncdispatch, asyncnet
 from nativesockets import AF_INET, SOCK_STREAM
 
 import net
 
 proc printResultSet[T](resultSet: ResultSet[T]) =
-  if not isNil(resultSet.columns) and resultSet.columns.len > 0:
+  if resultSet.columns.len > 0:
     for ix in low(resultSet.columns) .. high(resultSet.columns):
       stdmsg.writeLine("Column ", ix, " - ", $(resultSet.columns[ix].column_type))
       stdmsg.writeLine("    Name: ", resultSet.columns[ix].name)
@@ -23,7 +25,7 @@ proc printResultSet[T](resultSet: ResultSet[T]) =
   stdmsg.writeLine("last_insert_id = ", resultSet.status.last_insert_id)
   stdmsg.writeLine(resultSet.status.warning_count, " warnings")
   stdmsg.writeLine("status: ", $(resultSet.status.status_flags))
-  if not isNil(resultSet.status.info) and len(resultSet.status.info) > 0:
+  if len(resultSet.status.info) > 0:
     stdmsg.writeLine("Info: ", resultSet.status.info)
 
 proc demoTextQuery(conn: Connection, query: string) {.async.} =
@@ -34,13 +36,16 @@ proc demoPreparedStatement(conn: Connection) {.async.} =
   let stmt = await conn.prepareStatement("select *, ( ? + 1 ) from user u where u.user = ?")
   let rslt = await conn.preparedQuery(stmt, 42, "root")
   printResultSet(rslt)
+  await conn.closeStatement(stmt)
 
 proc blah() {. async .} =
   let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
   await connect(sock, "db4free.net", Port(3306))
   stdmsg.writeLine("(socket connection established)")
-  let conn = await establishConnection(sock, "mysqlclient", database = "mysqlclient", password = "mysqlclient")
-  # let conn = await establishConnection(sock, "test", database = "test", password = "test_pass", ssl = newContext(verifyMode = CVerifyPeer))
+  when defined(ssl):
+    let conn = await establishConnection(sock, "test", database = "testdb", password = "test_pass", sslHostname = "db4free.net", ssl = newContext(verifyMode = CVerifyPeer))
+  else:
+    let conn = await establishConnection(sock, "test", database = "testdb", password = "test_pass")
   stdmsg.writeLine("(mysql session established)")
   await conn.demoTextQuery("select * from mysql.user")
   await conn.demoPreparedStatement()

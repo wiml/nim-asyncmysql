@@ -7,11 +7,12 @@
 ##
 ## This is currently very experimental.
 ##
-## Copyright (c) 2015 William Lewis
+## Copyright (c) 2015,2020 William Lewis
 ##
+
 {.experimental: "notnil".}
 import asyncnet, asyncdispatch
-import strutils#, unsigned
+import strutils
 import openssl  # Needed for sha1 from libcrypto even if we don't support ssl connections
 
 when defined(ssl):
@@ -216,6 +217,13 @@ type
       of rvtDate, rvtTime, rvtDateTime:
         discard # TODO
 
+  ResultString* = object
+    case isNull: bool
+    of false:
+      value: string
+    of true:
+      discard
+
   ParamBindingType = enum
     paramNull,
     paramString,
@@ -233,7 +241,7 @@ type
       of paramNull:
         discard
       of paramString, paramBlob:
-        strVal: string# not nil
+        strVal: string
       of paramInt:
         intVal: int64
       of paramUInt:
@@ -298,6 +306,9 @@ type
     parameters: seq[ColumnDefinition]
     columns: seq[ColumnDefinition]
     warnings: Natural
+
+type sqlNull = distinct tuple[]
+const SQLNULL*: sqlNull = sqlNull( () )
 
 proc add(s: var string, a: seq[char]) =
   for ch in a:
@@ -494,13 +505,14 @@ proc approximatePackedSize(p: ParameterBinding): int {.inline.} =
   of paramInt, paramUInt:
     return 4
 
-proc asParam*(s: string): ParameterBinding =
-  if isNil(s):
-    ParameterBinding(typ: paramNull)
-  else:
-    ParameterBinding(typ: paramString, strVal: s)
+proc asParam*(n: sqlNull): ParameterBinding {. inline .} = ParameterBinding(typ: paramNull)
 
-proc asParam*(i: int): ParameterBinding = ParameterBinding(typ: paramInt, intVal: i)
+proc asParam*(n: typeof(nil)): ParameterBinding {. deprecated("Do not use nil for NULL parameters, use SQLNULL") .} = ParameterBinding(typ: paramNull)
+
+proc asParam*(s: string): ParameterBinding =
+  ParameterBinding(typ: paramString, strVal: s)
+
+proc asParam*(i: int): ParameterBinding {. inline .} = ParameterBinding(typ: paramInt, intVal: i)
 
 proc asParam*(i: uint): ParameterBinding =
   if i > uint(high(int)):
@@ -560,7 +572,7 @@ converter asInt*[T](v: ResultValue): T = return toNumber[T](v)
 converter asString*(v: ResultValue): string =
   case v.typ
   of rvtNull:
-    return nil
+    raise newException(ValueError, "NULL value")
   of rvtString, rvtBlob:
     return v.strVal
   else:
@@ -579,6 +591,41 @@ converter asBool*(v: ResultValue): bool =
   else:
     raise newException(ValueError, "cannot convert " & $(v.typ) & " to boolean")
 
+proc isNil*(v: ResultString): bool {.inline.} = v.isNull
+
+proc `$`*(v: ResultString): string =
+  case v.isNull
+  of true:
+    return "NULL"
+  of false:
+    return v.value
+
+converter asString*(v: ResultString): string =
+  case v.isNull:
+  of true:
+    raise newException(ValueError, "NULL value")
+  of false:
+    return v.value
+
+proc `==`*(a: ResultString, b: ResultString): bool =
+  case a.isNull
+  of true:
+    return b.isNull
+  of false:
+    return (not b.isNull) and (a.value == b.value)
+
+proc `==`*(a: ResultString, b: string): bool =
+  case a.isNull
+  of true:
+    false
+  of false:
+    return (a.value == b)
+
+proc asResultString*(s: string): ResultString {.inline.} =
+  ResultString(isNull: false, value: s)
+proc asResultString*(n: sqlNull): ResultString {.inline.} =
+  ResultString(isNull: true)
+
 ## ######################################################################
 ##
 ## MySQL packet packers/unpackers
@@ -586,7 +633,6 @@ converter asBool*(v: ResultValue): bool =
 proc processHeader(c: Connection, hdr: array[4, char]): nat24 =
   result = int32(hdr[0]) + int32(hdr[1])*256 + int32(hdr[2])*65536
   let pnum = uint8(hdr[3])
-  # stdmsg.writeLine("plen=", result, ", pnum=", pnum, " (expecting ", c.packet_number, ")")
   if pnum != c.packet_number:
     raise newException(ProtocolError, "Bad packet number (got sequence number " & $(pnum) & ", expected " & $(c.packet_number) & ")")
   c.packet_number += 1
@@ -624,7 +670,7 @@ else:
     let hdr = await conn.socket.recv(4)
     if len(hdr) == 0:
       if drop_ok:
-        return nil
+        return ""
       else:
         raise newException(ProtocolError, "Connection closed")
     if len(hdr) != 4:
@@ -736,12 +782,15 @@ proc writeHandshakeResponse(conn: Connection,
   var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection }
   if Cap.longFlag in conn.server_caps:
     incl(caps, Cap.longFlag)
-  if not isNil(auth_response) and Cap.pluginAuthLenencClientData in conn.server_caps:
-    if len(auth_response) > 255:
+  if len(auth_response) > 255:
+    if Cap.pluginAuthLenencClientData in conn.server_caps:
       incl(caps, Cap.pluginAuthLenencClientData)
-  if not isNil(database) and Cap.connectWithDb in conn.server_caps:
+    else:
+      raise newException(ProtocolError, "server cannot handle long auth_response")
+  if len(database) > 0 and Cap.connectWithDb in conn.server_caps:
     incl(caps, Cap.connectWithDb)
-  if not isNil(auth_plugin):
+  if len(auth_plugin) > 0:
+    # TODO: Is there a semantic difference between a zero-length auth_plugin and a missing one?
     incl(caps, Cap.pluginAuth)
 
   conn.client_caps = caps
@@ -759,15 +808,11 @@ proc writeHandshakeResponse(conn: Connection,
   putNulString(buf, username)
 
   # Authentication data
-  if not isNil(auth_response):
-    if Cap.pluginAuthLenencClientData in caps:
-      putLenInt(buf, len(auth_response))
-      buf.add(auth_response)
-    else:
-      putU8(buf, len(auth_response))
-      buf.add(auth_response)
+  if Cap.pluginAuthLenencClientData in caps:
+    putLenInt(buf, len(auth_response))
   else:
-    buf.add( char(0) )
+    putU8(buf, len(auth_response))
+  buf.add(auth_response)
 
   if Cap.connectWithDb in caps:
     putNulString(buf, database)
@@ -812,15 +857,15 @@ proc receiveMetadata(conn: Connection, count: Positive): Future[seq[ColumnDefini
   if uint8(endPacket[0]) != ResponseCode_EOF:
     raise newException(ProtocolError, "Expected EOF after column defs, got something else")
 
-proc parseTextRow(pkt: string): seq[string] =
+proc parseTextRow(pkt: string): seq[ResultString] =
   var pos = 0
-  result = newSeq[string]()
+  result = newSeq[ResultString]()
   while pos < len(pkt):
     if pkt[pos] == NullColumn:
-      result.add(nil)
+      result.add( ResultString(isNull: true) )
       inc(pos)
     else:
-      result.add(pkt.scanLenStr(pos))
+      result.add( ResultString(isNull: false, value: pkt.scanLenStr(pos)) )
 
 # EOF is signaled by a packet that starts with 0xFE, which is
 # also a valid length-encoded-integer. In order to distinguish
@@ -996,7 +1041,7 @@ proc execStatement(conn: Connection, stmt: PreparedStatement, params: openarray[
   return conn.sendPacket(pkt, reset_seq_no=true)
 
 when defined(ssl):
-  proc startTls(conn: Connection, ssl: SslContext): Future[void] {.async.} =
+  proc startTls(conn: Connection, ssl: SslContext, hostname: string): Future[void] {.async.} =
     # MySQL's equivalent of STARTTLS: we send a sort of stub response
     # here, do SSL setup, and continue afterwards with the encrypted connection
     if Cap.ssl notin conn.server_caps:
@@ -1012,7 +1057,7 @@ when defined(ssl):
       buf.add( char(0) )
     await conn.sendPacket(buf)
     # The server will respond with the SSL SERVER_HELLO packet.
-    wrapSocket(ssl, conn.socket, handshake=handshakeAsClient)
+    wrapConnectedSocket(ssl, conn.socket, handshake=handshakeAsClient, hostname=hostname)
     # and, once the encryption is negotiated, we will continue
     # with the real handshake response.
 
@@ -1020,11 +1065,13 @@ proc finishEstablishingConnection(conn: Connection,
                                   username, password, database: string,
                                   greet: greetingVars): Future[void] {.async.} =
   # password authentication
-  when declared(mysql_native_password_hash):
-    let authResponse = (if isNil(password): nil else: mysql_native_password_hash(greet.scramble, password) )
-  else:
-    var authResponse:string
-  await conn.writeHandshakeResponse(username, authResponse, database, nil)
+  if password.len == 0:
+    # We use a 0-length password to indicate no password, since we don't have nillable strings
+    await conn.writeHandshakeResponse(username, "", database, "")
+  else: # in future: if greet.authentication_plugin == "" or greet.authentication_plugin == mysql_native_auth_id
+    await conn.writeHandshakeResponse(
+      username, mysql_native_password_hash(greet.scramble, password),
+      database, greet.authentication_plugin)
 
   # await confirmation from the server
   let pkt = await conn.receivePacket()
@@ -1036,29 +1083,31 @@ proc finishEstablishingConnection(conn: Connection,
     raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
 
 when declared(SslContext) and declared(startTls):
-  proc establishConnection*(sock: AsyncSocket, username: string, password: string = nil, database: string = nil, ssl: SslContext): Future[Connection] {.async.} =
     result = Connection(socket: sock)
+  proc establishConnection*(sock: AsyncSocket, username: string, password: string, database: string = "", sslHostname: string, ssl: SslContext): Future[Connection] {.async.} =
     let pkt = await result.receivePacket()
     let greet = result.parseInitialGreeting(pkt)
 
     # Negotiate encryption
-    await result.startTls(ssl)
+    await result.startTls(ssl, sslHostname)
+
+    # And finish the handshake
     await result.finishEstablishingConnection(username, password, database, greet)
 
-proc establishConnection*(sock: AsyncSocket, username: string, password: string = nil, database: string = nil): Future[Connection] {.async.} =
   result = Connection(socket: sock)
+proc establishConnection*(sock: AsyncSocket, username: string, password: string, database: string = ""): Future[Connection] {.async.} =
   let pkt = await result.receivePacket()
   let greet = result.parseInitialGreeting(pkt)
   await result.finishEstablishingConnection(username, password, database, greet)
 
-proc textQuery*(conn: Connection, query: string): Future[ResultSet[string]] {.async.} =
+proc textQuery*(conn: Connection, query: string): Future[ResultSet[ResultString]] {.async.} =
   await conn.sendQuery(query)
   let pkt = await conn.receivePacket()
   if isOKPacket(pkt):
     # Success, but no rows returned.
     result.status = parseOKPacket(conn, pkt)
     result.columns = @[]
-    result.rows = nil
+    result.rows = @[]
   elif isERRPacket(pkt):
     # Some kind of failure.
     raise parseErrorPacket(pkt)
@@ -1066,7 +1115,7 @@ proc textQuery*(conn: Connection, query: string): Future[ResultSet[string]] {.as
     var p = 0
     let column_count = scanLenInt(pkt, p)
     result.columns = await conn.receiveMetadata(column_count)
-    var rows: seq[seq[string]]
+    var rows: seq[seq[ResultString]]
     newSeq(rows, 0)
     while true:
       let pkt = await conn.receivePacket()
@@ -1090,7 +1139,7 @@ proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[
     # Success, but no rows returned.
     result.status = parseOKPacket(conn, initialPacket)
     result.columns = @[]
-    result.rows = nil
+    result.rows = @[]
   elif isERRPacket(initialPacket):
     # Some kind of failure.
     raise parseErrorPacket(initialPacket)
@@ -1166,7 +1215,7 @@ when isMainModule or defined(test):
       return 0
     stdmsg.write(" ", expected, "!=", got)
     return 1
-  when declared(openssl.EvpSHA1) and declared(EvpDigestCtxCreate):
+  when declared(mysql_native_password_hash):
     proc test_native_hash(scramble: string, password: string, expected: string) =
       let got = mysql_native_password_hash(scramble, password)
       expect(expected, hexstr(got))
@@ -1182,6 +1231,9 @@ when isMainModule or defined(test):
       test_native_hash("<G.N}OR-(~e^+VQtrao-",
                       "aaaaaaaaaaaaaaaaaaaabbbbbbbbbb",
                       "78797fae31fc733107e778ee36e124436761bddc")
+  else: # not declared(mysql_native_password_hash)
+    proc test_hashes() =
+     stdmsg.writeLine "- Password hashing: SKIPPED (passwords not supported in this build)"
 
   proc test_prim_values() =
     echo "- Packing/unpacking of primitive types"
@@ -1245,14 +1297,14 @@ when isMainModule or defined(test):
            hexstr(buf))
     stdmsg.write("  packing numbers and NULLs: ")
     sth.parameters = sth.parameters & dummy_param
-    let buf2 = formatBoundParams(sth, [ asParam(-128), asParam(-129), asParam(-255), asParam(nil), asParam(nil), asParam(-256), asParam(-257), asParam(-32768), asParam(nil)  ])
+    let buf2 = formatBoundParams(sth, [ asParam(-128), asParam(-129), asParam(-255), asParam(nil), asParam(SQLNULL), asParam(-256), asParam(-257), asParam(-32768), asParam(SQLNULL)  ])
     expect("000000001700ffaa550001000000180101" &  # packet header
            "010002000200020002000200" &            # wire type info
            "807fff01ff00fffffe0080",               # packed values
            hexstr(buf2))
 
     stdmsg.write("  more values: ")
-    let buf3 = formatBoundParams(sth, [ asParam("hello"), asParam(nil),
+    let buf3 = formatBoundParams(sth, [ asParam("hello"), asParam(SQLNULL),
       asParam(0xFFFF), asParam(0xF1F2F3), asParam(0xFFFFFFFF), asParam(0xFFFFFFFFFF),
       asParam(-12885), asParam(-2160069290), asParam(low(int64) + 512) ])
     expect("000000001700ffaa550001000000020001" &  # packet header
@@ -1264,8 +1316,7 @@ when isMainModule or defined(test):
     echo "Running asyncmysql internal tests"
     test_prim_values()
     test_param_pack()
-    when declared(openssl.EvpSHA1) and declared(EvpDigestCtxCreate):
-      test_hashes()
+    test_hashes()
 
   when isMainModule:
     runInternalTests()
