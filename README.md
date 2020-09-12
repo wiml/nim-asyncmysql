@@ -39,16 +39,6 @@ The compressed protocol is not supported--- I'm not sure if this is
 actually a deficiency. As a workaround, SSL with a null cipher and
 compression could be used.
 
-For password authentication to work, you need a patched version of
-Nim's openssl module which provides access to the EVP_MD API in libcrypto.
-A patch is in openssl_evp.patch, but it is perhaps too ad-hoc for
-integration into Nim.
-
-For SSL connections to work, you need a patched version of Nim's
-asyncnet module which properly handshakes a ssl-wrapped socket.
-You can find that here, until/unless it is accepted into
-mainline Nim: https://github.com/wiml/Nim/tree/starttls
-
 For local (unix-domain) connections to work, you would need to extend Nim's
 socket modules to support those.
 

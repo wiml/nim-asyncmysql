@@ -13,7 +13,7 @@
 {.experimental: "notnil".}
 import asyncnet, asyncdispatch
 import strutils
-import openssl  # Needed for sha1 from libcrypto even if we don't support ssl connections
+import std/sha1 as sha1
 
 when defined(ssl):
   import net  # needed for the SslContext type
@@ -704,44 +704,20 @@ type
     scramble: string
     authentication_plugin: string
 
-when declared(openssl.EvpSHA1) and declared(EvpDigestCtxCreate):
-  # This implements the "mysql_native_password" auth plugin,
-  # which is the only auth we support.
-  proc mysql_native_password_hash(scramble: string, password: string): string =
-    let sha1 = EvpSHA1()
-    let ctx = EvpDigestCtxCreate()
-    proc add(buf: string) = ctx.update(cast[seq[char]](buf))
-    proc add(buf: seq[uint8]) {.inline.} = ctx.update(cast[seq[char]](buf))
-    proc hashfinal(): seq[char] =
-      newSeq(result, EvpDigestSize(sha1))
-      if ctx.final(result[0].addr, nil) == 0:
-        doAssert(false, "EVP_DigestFinal_ex failed")
-      ctx.cleanup()
+# This implements the "mysql_native_password" auth plugin,
+# which is the only auth we support.
+proc mysql_native_password_hash(scramble: string, password: string): string =
+  let phash1 = sha1.Sha1Digest(sha1.secureHash(password))
+  let phash2 = sha1.Sha1Digest(sha1.secureHash(cast[array[20, char]](phash1)))
 
-    block:
-      let ok = ctx.init(sha1, nil)
-      doAssert(ok != 0, "EVP_DigestInit_ex failed")
-    add(password)
-    let phash1 = hashfinal()
+  var ctx = sha1.newSha1State()
+  ctx.update(scramble)
+  ctx.update(cast[array[20, char]](phash2))
+  let rhs = ctx.finalize()
 
-    block:
-      let ok = ctx.init(sha1, nil)
-      doAssert(ok != 0, "EVP_DigestInit_ex failed")
-    ctx.update(phash1)
-    let phash2 = hashfinal()
-
-    block:
-      let ok = ctx.init(sha1, nil)
-      doAssert(ok != 0, "EVP_DigestInit_ex failed")
-    add(scramble)
-    ctx.update(phash2)
-    let rhs = hashfinal()
-
-    EvpDigestCtxDestroy(ctx)
-
-    result = newString(len(phash1))
-    for i in 0 .. len(phash1)-1:
-      result[i] = char(uint8(phash1[i]) xor uint8(rhs[i]))
+  result = newString(1+high(phash1))
+  for i in 0 .. high(phash1):
+    result[i] = char(phash1[i] xor rhs[i])
 
 proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
   let protocolVersion = uint8(greeting[0])
