@@ -10,7 +10,11 @@ var host_name: string = "localhost"
 var user_name: string
 var pass_word: string
 var ssl: bool = false
+var allow_mitm: bool = false
 var verbose: bool = false
+
+when defined(ssl):
+  ssl = true
 
 proc doTCPConnect(dbn: string = ""): Future[Connection] {.async.} =
   let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
@@ -19,10 +23,12 @@ proc doTCPConnect(dbn: string = ""): Future[Connection] {.async.} =
     raise newException(ValueError, "nil socket")
   else:
     if ssl:
-      let ctx = newContext(verifyMode = CVerifyPeer)
-      return await establishConnection(sock, user_name, database=dbn, password = pass_word, sslHostname = host_name, ssl=ctx)
-    else:
-      return await establishConnection(sock, user_name, database=dbn, password = pass_word)
+      when defined(ssl):
+        let ctx = newContext(verifyMode = (if allow_mitm: CVerifyNone else: CVerifyPeer))
+        return await establishConnection(sock, user_name, database=dbn, password = pass_word, sslHostname = host_name, ssl=ctx)
+      else:
+        raise newException(CatchableError, "ssl is not enabled in this build")
+    return await establishConnection(sock, user_name, database=dbn, password = pass_word)
 
 proc getCurrentDatabase(conn: Connection): Future[ResultString] {.async.} =
   let rslt = await conn.textQuery("select database()")
@@ -164,7 +170,9 @@ proc usage(unopt: string = "") =
   echo "\t-h, --host: Connect to server on host. (default: localhost)"
   echo "\t-P, --port: Connect to specified TCP port (default: 3306)"
   echo "\t-u, --username: Connect as specified username (required)"
+  echo "\t-p, --password: Provide the specified password"
   echo "\t--ssl, --no-ssl: Enable ssl/tls (default: cleartext)"
+  echo "\t--allow-mitm: Disable security checks for SSL"
   echo "\t-v: More verbose output"
   echo "The user must have the ability to create and drop tables in the"
   echo "database, as well as the usual select and insert privileges."
@@ -199,6 +207,8 @@ block:
       ssl = true
     of "--no-ssl":
       ssl = false
+    of "--allow-mitm":
+      allow_mitm = true
     of "-v", "--verbose":
       verbose = true
     else:

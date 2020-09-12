@@ -251,7 +251,7 @@ type
   nat24 = range[0 .. 16777215]
   Connection* = ref ConnectionObj
   ConnectionObj = object of RootObj
-    socket: AsyncSocket               # Bytestream connection
+    socket: AsyncSocket not nil       # Bytestream connection
     packet_number: uint8              # Next expected seq number (mod-256)
 
     # Information from the connection setup
@@ -267,7 +267,7 @@ type
   ProtocolError = object of IOError
 
   # Server response packets: OK and EOF
-  ResponseOK = object {.final.}
+  ResponseOK {.final.} = object
     eof               : bool  # True if EOF packet, false if OK packet
     affected_rows*    : Natural
     last_insert_id*   : Natural
@@ -281,7 +281,7 @@ type
     error_code: uint16
     sqlstate: string
 
-  ColumnDefinition* = object {.final.}
+  ColumnDefinition* {.final.} = object
     catalog*     : string
     schema*      : string
     table*       : string
@@ -295,7 +295,7 @@ type
     flags*       : set[FieldFlag]
     decimals*    : int
 
-  ResultSet*[T] = object {.final.}
+  ResultSet*[T] {.final.} = object
     status*     : ResponseOK
     columns*    : seq[ColumnDefinition]
     rows*       : seq[seq[T]]
@@ -309,10 +309,6 @@ type
 
 type sqlNull = distinct tuple[]
 const SQLNULL*: sqlNull = sqlNull( () )
-
-proc add(s: var string, a: seq[char]) =
-  for ch in a:
-    s.add(ch)
 
 ## ######################################################################
 ##
@@ -562,11 +558,11 @@ proc toNumber[T](v: ResultValue): T {.inline.} =
   else:
     raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
 
-converter asInt*[T](v: ResultValue): T = return toNumber[T](v)
-# converter asInt*(v: ResultValue): int = return toNumber[int](v)
-# converter asInt*(v: ResultValue): uint = return toNumber[uint](v)
-# converter asInt*(v: ResultValue): int64 = return toNumber[int64](v)
-# converter asInt*(v: ResultValue): uint64 = return toNumber[uint64](v)
+converter asInt8*(v: ResultValue): uint8 = return toNumber[uint8](v)
+converter asInt*(v: ResultValue): int = return toNumber[int](v)
+converter asUInt*(v: ResultValue): uint = return toNumber[uint](v)
+converter asInt64*(v: ResultValue): int64 = return toNumber[int64](v)
+converter asUInt64*(v: ResultValue): uint64 = return toNumber[uint64](v)
 {. pop .}
 
 converter asString*(v: ResultValue): string =
@@ -857,7 +853,7 @@ proc isERRPacket(pkt: string): bool = (len(pkt) >= 3) and (pkt[0] == char(Respon
 
 proc isOKPacket(pkt: string): bool = (len(pkt) >= 3) and (pkt[0] == char(ResponseCode_OK))
 
-proc parseErrorPacket(pkt: string): ref ResponseERR =
+proc parseErrorPacket(pkt: string): ref ResponseERR not nil =
   new(result)
   result.error_code = scanU16(pkt, 1)
   var pos: int
@@ -1059,8 +1055,13 @@ proc finishEstablishingConnection(conn: Connection,
     raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
 
 when declared(SslContext) and declared(startTls):
-    result = Connection(socket: sock)
-  proc establishConnection*(sock: AsyncSocket, username: string, password: string, database: string = "", sslHostname: string, ssl: SslContext): Future[Connection] {.async.} =
+  proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = "", sslHostname: string, ssl: SslContext): Future[Connection] {.async.} =
+    if isNil(ssl):
+      raise newException(ValueError, "nil SSL context")
+    if isNil(sock):
+      raise newException(ValueError, "nil socket")
+    else:
+      result = Connection(socket: sock)
     let pkt = await result.receivePacket()
     let greet = result.parseInitialGreeting(pkt)
 
@@ -1070,8 +1071,11 @@ when declared(SslContext) and declared(startTls):
     # And finish the handshake
     await result.finishEstablishingConnection(username, password, database, greet)
 
-  result = Connection(socket: sock)
-proc establishConnection*(sock: AsyncSocket, username: string, password: string, database: string = ""): Future[Connection] {.async.} =
+proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = ""): Future[Connection] {.async.} =
+  if isNil(sock):
+    raise newException(ValueError, "nil socket")
+  else:
+    result = Connection(socket: sock)
   let pkt = await result.receivePacket()
   let greet = result.parseInitialGreeting(pkt)
   await result.finishEstablishingConnection(username, password, database, greet)

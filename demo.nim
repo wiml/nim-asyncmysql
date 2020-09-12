@@ -39,7 +39,12 @@ proc demoPreparedStatement(conn: Connection) {.async.} =
   await conn.closeStatement(stmt)
 
 proc blah() {. async .} =
-  let sock = newAsyncSocket(AF_INET, SOCK_STREAM)
+  let sockn = newAsyncSocket(AF_INET, SOCK_STREAM)
+  var sock: AsyncSocket not nil
+  if sockn.isNil:
+    raise newException(ValueError, "nil socket")
+  else:
+    sock = sockn
   await connect(sock, "db4free.net", Port(3306))
   stdmsg.writeLine("(socket connection established)")
   when defined(ssl):
