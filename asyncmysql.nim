@@ -477,7 +477,7 @@ proc addValueUnlessNULL(p: ParameterBinding, pkt: var string) =
       if p.intVal >= 256:
         pkt.putU8((p.intVal shr 8) and 0xFF)
         if p.intVal >= 65536:
-          pkt.putU16( (p.intVal shr 16).uint16 and 0xFFFF'u16)
+          pkt.putU16( ((p.intVal shr 16) and 0xFFFF).uint16 )
           if p.intVal >= (65536'i64 * 65536'i64):
             pkt.putU32(uint32(p.intVal shr 32))
     else:
@@ -613,7 +613,7 @@ proc `==`*(a: ResultString, b: ResultString): bool =
 proc `==`*(a: ResultString, b: string): bool =
   case a.isNull
   of true:
-    false
+    return false
   of false:
     return (a.value == b)
 
