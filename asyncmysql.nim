@@ -310,6 +310,8 @@ type
 type sqlNull = distinct tuple[]
 const SQLNULL*: sqlNull = sqlNull( () )
 
+const advertisedMaxPacketSize: uint32 = 65536 # max packet size, TODO: what should I put here?
+
 ## ######################################################################
 ##
 ## Basic datatype packers/unpackers
@@ -740,7 +742,7 @@ proc writeHandshakeResponse(conn: Connection,
 
   # Fixed-length portion
   putU32(buf, cast[uint32](caps))
-  putU32(buf, 65536'u32)  # max packet size, TODO: what should I put here?
+  putU32(buf, advertisedMaxPacketSize)
   buf.add( char(Charset_utf8_ci) )
 
   # 23 bytes of filler
@@ -993,7 +995,7 @@ when defined(ssl):
     buf.setLen(4)
     var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection, Cap.ssl }
     putU32(buf, cast[uint32](caps))
-    putU32(buf, 65536'u32)  # max packet size, TODO: what should I put here?
+    putU32(buf, advertisedMaxPacketSize)
     buf.add( char(Charset_utf8_ci) )
     # 23 bytes of filler
     for i in 1 .. 23:
