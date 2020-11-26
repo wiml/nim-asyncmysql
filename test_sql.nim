@@ -36,6 +36,17 @@ proc getCurrentDatabase(conn: Connection): Future[ResultString] {.async.} =
   doAssert(len(rslt.rows) == 1, "wrong number of result rows")
   return rslt.rows[0][0]
 
+proc checkCurrentCipher(conn: Connection): Future[bool] {.async.} =
+  let rslt = await conn.textQuery("show session status like 'Ssl_cipher'")
+  doAssert(len(rslt.columns) == 2, "wrong number of result columns")
+  doAssert(len(rslt.rows) == 1, "wrong number of result rows")
+  echo "  ", rslt.rows[0][0], " = ", rslt.rows[0][1]
+  let ssl_cipher = rslt.rows[0][1]
+  if ssl_cipher.isNil or ssl_cipher == "":
+    return false
+  else:
+    return true
+
 proc connTest(): Future[Connection] {.async.} =
   echo "Connecting (with initial db: ", database_name, ")"
   let conn1 = await doTCPConnect(dbn = database_name)
@@ -65,6 +76,11 @@ proc connTest(): Future[Connection] {.async.} =
       saw_conn2 = true
   doAssert(saw_conn1, "Didn't see conn1's TID")
   doAssert(saw_conn2, "Didn't see conn2's TID")
+  let ssl1 = conn1.checkCurrentCipher()
+  let ssl2 = conn2.checkCurrentCipher()
+  await `and`(ssl1, ssl2)
+  doAssert(ssl1.read() == ssl)
+  doAssert(ssl2.read() == ssl)
   echo "Closing second connection"
   await conn2.close()
   return conn1
@@ -222,3 +238,4 @@ when defined(test):
   runInternalTests()
 waitFor(runTests())
 echo "Done"
+quit(QuitSuccess)

@@ -687,6 +687,7 @@ proc mysql_native_password_hash(scramble: string, password: string): string =
   result = newString(1+high(phash1))
   for i in 0 .. high(phash1):
     result[i] = char(phash1[i] xor rhs[i])
+const mysql_native_password_plugin = "mysql_native_password"
 
 proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
   let protocolVersion = uint8(greeting[0])
@@ -716,29 +717,60 @@ proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
     if Cap.pluginAuth in conn.server_caps:
       result.authentication_plugin = scanNulStringX(greeting, pos)
 
-proc writeHandshakeResponse(conn: Connection,
-                            username: string,
-                            auth_response: string,
-                            database: string,
-                            auth_plugin: string): Future[void] =
-  var buf: string = newStringOfCap(128)
-  buf.setLen(4)
+proc computeHandshakeResponse(conn: Connection,
+                              greetingPacket: string,
+                              username, password: string,
+                              database: string,
+                              starttls: bool): string =
 
-  var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection }
-  if Cap.longFlag in conn.server_caps:
+  let greet: greetingVars = conn.parseInitialGreeting(greetingPacket)
+
+  let server_caps = conn.server_caps
+  var caps: set[Cap] = { Cap.longPassword,
+                         Cap.protocol41,
+                         Cap.secureConnection }
+  if Cap.longFlag in server_caps:
     incl(caps, Cap.longFlag)
+
+  if len(database) > 0 and Cap.connectWithDb in conn.server_caps:
+    incl(caps, Cap.connectWithDb)
+
+  if starttls:
+    if Cap.ssl notin conn.server_caps:
+      raise newException(ProtocolError, "Server does not support SSL")
+    else:
+      incl(caps, Cap.ssl)
+
+  # Figure out our authentication response. Right now we only
+  # support the mysql_native_password_hash method.
+  var auth_response: string
+  var auth_plugin: string
+
+  # password authentication
+  if password.len == 0:
+    # The caller passes a 0-length password to indicate no password, since
+    # we don't have nillable strings.
+    auth_response = ""
+    auth_plugin = ""
+  else: # in future: if greet.authentication_plugin == "" or greet.authentication_plugin == mysql_native_password
+    auth_response = mysql_native_password_hash(greet.scramble, password)
+    if Cap.pluginAuth in server_caps:
+      auth_plugin = mysql_native_password_plugin
+      incl(caps, Cap.pluginAuth)
+    else:
+      auth_plugin = ""
+
+  # Do we need pluginAuthLenencClientData ?
   if len(auth_response) > 255:
-    if Cap.pluginAuthLenencClientData in conn.server_caps:
+    if Cap.pluginAuthLenencClientData in server_caps:
       incl(caps, Cap.pluginAuthLenencClientData)
     else:
       raise newException(ProtocolError, "server cannot handle long auth_response")
-  if len(database) > 0 and Cap.connectWithDb in conn.server_caps:
-    incl(caps, Cap.connectWithDb)
-  if len(auth_plugin) > 0:
-    # TODO: Is there a semantic difference between a zero-length auth_plugin and a missing one?
-    incl(caps, Cap.pluginAuth)
 
   conn.client_caps = caps
+
+  var buf: string = newStringOfCap(128)
+  buf.setLen(4)
 
   # Fixed-length portion
   putU32(buf, cast[uint32](caps))
@@ -753,8 +785,9 @@ proc writeHandshakeResponse(conn: Connection,
   putNulString(buf, username)
 
   # Authentication data
+  let authLen = len(auth_response)
   if Cap.pluginAuthLenencClientData in caps:
-    putLenInt(buf, len(auth_response))
+    putLenInt(buf, authLen)
   else:
     putU8(buf, len(auth_response))
   buf.add(auth_response)
@@ -765,7 +798,7 @@ proc writeHandshakeResponse(conn: Connection,
   if Cap.pluginAuth in caps:
     putNulString(buf, auth_plugin)
 
-  return conn.sendPacket(buf)
+  return buf
 
 proc sendQuery(conn: Connection, query: string): Future[void] =
   var buf: string = newStringOfCap(4 + 1 + len(query))
@@ -985,39 +1018,7 @@ proc execStatement(conn: Connection, stmt: PreparedStatement, params: openarray[
   var pkt = formatBoundParams(stmt, params)
   return conn.sendPacket(pkt, reset_seq_no=true)
 
-when defined(ssl):
-  proc startTls(conn: Connection, ssl: SslContext, hostname: string): Future[void] {.async.} =
-    # MySQL's equivalent of STARTTLS: we send a sort of stub response
-    # here, do SSL setup, and continue afterwards with the encrypted connection
-    if Cap.ssl notin conn.server_caps:
-      raise newException(ProtocolError, "Server does not support SSL")
-    var buf: string = newStringOfCap(32)
-    buf.setLen(4)
-    var caps: set[Cap] = { Cap.longPassword, Cap.protocol41, Cap.secureConnection, Cap.ssl }
-    putU32(buf, cast[uint32](caps))
-    putU32(buf, advertisedMaxPacketSize)
-    buf.add( char(Charset_utf8_ci) )
-    # 23 bytes of filler
-    for i in 1 .. 23:
-      buf.add( char(0) )
-    await conn.sendPacket(buf)
-    # The server will respond with the SSL SERVER_HELLO packet.
-    wrapConnectedSocket(ssl, conn.socket, handshake=handshakeAsClient, hostname=hostname)
-    # and, once the encryption is negotiated, we will continue
-    # with the real handshake response.
-
-proc finishEstablishingConnection(conn: Connection,
-                                  username, password, database: string,
-                                  greet: greetingVars): Future[void] {.async.} =
-  # password authentication
-  if password.len == 0:
-    # We use a 0-length password to indicate no password, since we don't have nillable strings
-    await conn.writeHandshakeResponse(username, "", database, "")
-  else: # in future: if greet.authentication_plugin == "" or greet.authentication_plugin == mysql_native_auth_id
-    await conn.writeHandshakeResponse(
-      username, mysql_native_password_hash(greet.scramble, password),
-      database, greet.authentication_plugin)
-
+proc finishEstablishingConnection(conn: Connection): Future[void] {.async.} =
   # await confirmation from the server
   let pkt = await conn.receivePacket()
   if isOKPacket(pkt):
@@ -1027,7 +1028,7 @@ proc finishEstablishingConnection(conn: Connection,
   else:
     raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
 
-when declared(SslContext) and declared(startTls):
+when declared(SslContext) and defined(ssl):
   proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = "", sslHostname: string, ssl: SslContext): Future[Connection] {.async.} =
     if isNil(ssl):
       raise newException(ValueError, "nil SSL context")
@@ -1036,13 +1037,27 @@ when declared(SslContext) and declared(startTls):
     else:
       result = Connection(socket: sock)
     let pkt = await result.receivePacket()
-    let greet = result.parseInitialGreeting(pkt)
+    var response = computeHandshakeResponse(result, pkt,
+                                            username, password, database,
+                                            starttls = true)
 
-    # Negotiate encryption
-    await result.startTls(ssl, sslHostname)
+    # MySQL's equivalent of STARTTLS: we send a sort of stub response
+    # here, which is a prefix of the real response just containing our
+    # client caps flags, then do SSL setup, and send the entire response
+    # over the encrypted connection.
+    var stub: string = response[0 ..< 36]
+    await result.sendPacket(stub)
+
+    # The server will respond with the SSL SERVER_HELLO packet.
+    wrapConnectedSocket(ssl, result.socket,
+                        handshake = handshakeAsClient,
+                        hostname = sslHostname)
+    # and, once the encryption is negotiated, we will continue
+    # with the real handshake response.
+    await result.sendPacket(response)
 
     # And finish the handshake
-    await result.finishEstablishingConnection(username, password, database, greet)
+    await result.finishEstablishingConnection()
 
 proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = ""): Future[Connection] {.async.} =
   if isNil(sock):
@@ -1050,8 +1065,11 @@ proc establishConnection*(sock: AsyncSocket not nil, username: string, password:
   else:
     result = Connection(socket: sock)
   let pkt = await result.receivePacket()
-  let greet = result.parseInitialGreeting(pkt)
-  await result.finishEstablishingConnection(username, password, database, greet)
+  var response = computeHandshakeResponse(result, pkt,
+                                          username, password, database,
+                                          starttls = false)
+  await result.sendPacket(response)
+  await result.finishEstablishingConnection()
 
 proc textQuery*(conn: Connection, query: string): Future[ResultSet[ResultString]] {.async.} =
   await conn.sendQuery(query)
