@@ -81,6 +81,9 @@ proc connTest(): Future[Connection] {.async.} =
   await `and`(ssl1, ssl2)
   doAssert(ssl1.read() == ssl)
   doAssert(ssl2.read() == ssl)
+  let p1 = conn1.ping()
+  let p2 = conn2.ping()
+  await `and`(p1, p2)
   echo "Closing second connection"
   await conn2.close()
   return conn1

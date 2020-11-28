@@ -800,6 +800,11 @@ proc computeHandshakeResponse(conn: Connection,
 
   return buf
 
+proc sendCommand(conn: Connection, cmd: Command): Future[void] =
+  var buf: string = newString(5)
+  buf[4] = char(cmd)
+  return conn.sendPacket(buf, reset_seq_no=true)
+
 proc sendQuery(conn: Connection, query: string): Future[void] =
   var buf: string = newStringOfCap(4 + 1 + len(query))
   buf.setLen(4)
@@ -888,6 +893,15 @@ proc parseEOFPacket(pkt: string): ResponseOK =
   result.eof = true
   result.warning_count = scanU16(pkt, 1)
   result.status_flags = cast[set[Status]]( scanU16(pkt, 3) )
+
+proc expectOK(conn: Connection, ctxt: string): Future[ResponseOK] {.async.} =
+  let pkt = await conn.receivePacket()
+  if isERRPacket(pkt):
+    raise parseErrorPacket(pkt)
+  elif isOKPacket(pkt):
+    return parseOKPacket(conn, pkt)
+  else:
+    raise newException(ProtocolError, "unexpected response to " & ctxt)
 
 proc prepareStatement*(conn: Connection, query: string): Future[PreparedStatement] {.async.} =
   var buf: string = newStringOfCap(4 + 1 + len(query))
@@ -1014,10 +1028,6 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[ResultValu
       of fieldTypeEnum, fieldTypeSet, fieldTypeGeometry:
         raise newException(ProtocolError, "Unexpected field type " & $(typ) & " in resultset")
 
-proc execStatement(conn: Connection, stmt: PreparedStatement, params: openarray[ParameterBinding]): Future[void] =
-  var pkt = formatBoundParams(stmt, params)
-  return conn.sendPacket(pkt, reset_seq_no=true)
-
 proc finishEstablishingConnection(conn: Connection): Future[void] {.async.} =
   # await confirmation from the server
   let pkt = await conn.receivePacket()
@@ -1143,19 +1153,14 @@ proc selectDatabase*(conn: Connection, database: string): Future[ResponseOK] {.a
   buf.add( char(Command.initDb) )
   buf.add(database)
   await conn.sendPacket(buf, reset_seq_no=true)
-  let pkt = await conn.receivePacket()
-  if isERRPacket(pkt):
-    raise parseErrorPacket(pkt)
-  elif isOKPacket(pkt):
-    return parseOKPacket(conn, pkt)
-  else:
-    raise newException(ProtocolError, "unexpected response to COM_INIT_DB")
+  return await conn.expectOK("COM_INIT_DB")
+
+proc ping*(conn: Connection): Future[ResponseOK] {.async.} =
+  await conn.sendCommand(Command.ping)
+  return await conn.expectOK("COM_PING")
 
 proc close*(conn: Connection): Future[void] {.async.} =
-  var buf: string = newStringOfCap(5)
-  buf.setLen(4)
-  buf.add( char(Command.quiT) )
-  await conn.sendPacket(buf, reset_seq_no=true)
+  await conn.sendCommand(Command.quiT)
   let pkt = await conn.receivePacket(drop_ok=true)
   conn.socket.close()
 
