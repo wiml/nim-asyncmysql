@@ -1,4 +1,3 @@
-##
 ## This module implements (a subset of) the MySQL/MariaDB client
 ## protocol based on asyncnet and asyncdispatch.
 ##
@@ -201,6 +200,10 @@ type
     rvtString,
     rvtBlob
   ResultValue* = object
+    ## A value returned from the server when using the prepared statement
+    ## (binary) protocol. This might contain a numeric or string type
+    ## or NULL. To check for NULL, use `isNil`; attempts to read a value
+    ## from a NULL result will result in a `ValueError`.
     case typ: ResultValueType
       of rvtInteger:
         intVal: int
@@ -218,6 +221,8 @@ type
         discard # TODO
 
   ResultString* = object
+    ## A value returned from the server when using the text protocol.
+    ## This contains either a string or an SQL NULL.
     case isNull: bool
     of false:
       value: string
@@ -249,8 +254,8 @@ type
 
 type
   nat24 = range[0 .. 16777215]
-  Connection* = ref ConnectionObj
-  ConnectionObj = object of RootObj
+  Connection* = ref ConnectionObj     ## A database connection handle.
+  ConnectionObj* = object of RootObj
     socket: AsyncSocket not nil       # Bytestream connection
     packet_number: uint8              # Next expected seq number (mod-256)
 
@@ -262,12 +267,16 @@ type
     # Other connection parameters
     client_caps: set[Cap]
 
-  # ProtocolError indicates we got something we don't understand. We might
-  # even have lost framing, etc.. The connection should really be closed at this point.
-  ProtocolError = object of IOError
+  ProtocolError* = object of IOError
+    ## ProtocolError is thrown if we get something we don't understand
+    ## or expect. This is generally a fatal error as far as this connection
+    ## is concerned, since we might have lost framing, packet sequencing,
+    ## etc.. Unexpected connection closure will also result in this exception.
 
   # Server response packets: OK and EOF
-  ResponseOK {.final.} = object
+  ResponseOK* {.final.} = object
+    ## Status information returned from the server after each successful
+    ## command.
     eof               : bool  # True if EOF packet, false if OK packet
     affected_rows*    : Natural
     last_insert_id*   : Natural
@@ -277,9 +286,10 @@ type
     # session_state_changes: seq[ ... ]
 
   # Server response packet: ERR (which can be thrown as an exception)
-  ResponseERR = object of CatchableError
-    error_code: uint16
-    sqlstate: string
+  ResponseERR* = object of CatchableError
+    ## This exception is thrown when a command fails.
+    error_code*: uint16  ## A MySQL-specific error number
+    sqlstate*: string    ## An ANSI SQL state code
 
   ColumnDefinition* {.final.} = object
     catalog*     : string
@@ -309,12 +319,15 @@ type
 
 type sqlNull = distinct tuple[]
 const SQLNULL*: sqlNull = sqlNull( () )
+  ## `SQLNULL` is a singleton value corresponding to SQL's NULL.
+  ## This is used to send a NULL value for a parameter when
+  ## executing a prepared statement.
 
 const advertisedMaxPacketSize: uint32 = 65536 # max packet size, TODO: what should I put here?
 
-## ######################################################################
-##
-## Basic datatype packers/unpackers
+# ######################################################################
+#
+# Basic datatype packers/unpackers
 
 # Integers
 
@@ -427,9 +440,9 @@ proc hexdump(buf: openarray[char], fp: File) =
     fp.write("|\n")
 
 
-## ######################################################################
-##
-## Parameter and result packers/unpackers
+# ######################################################################
+#
+# Parameter and result packers/unpackers
 
 proc addTypeUnlessNULL(p: ParameterBinding, pkt: var string) =
   case p.typ
@@ -532,6 +545,10 @@ proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVa
 proc isNil*(v: ResultValue): bool {.inline.} = v.typ == rvtNull
 
 proc `$`*(v: ResultValue): string =
+  ## Produce an approximate string representation of the value. This
+  ## should mainly be restricted to debugging uses, since it is impossible
+  ## to distingiuish between, *e.g.*, a NULL value and the four-character
+  ## string "NULL".
   case v.typ
   of rvtNull:
     return "NULL"
@@ -568,6 +585,7 @@ converter asUInt64*(v: ResultValue): uint64 = return toNumber[uint64](v)
 {. pop .}
 
 converter asString*(v: ResultValue): string =
+  ## If the value is a string, return it; otherwise raise a `ValueError`.
   case v.typ
   of rvtNull:
     raise newException(ValueError, "NULL value")
@@ -577,6 +595,9 @@ converter asString*(v: ResultValue): string =
     raise newException(ValueError, "value is " & $(v.typ) & ", not string")
 
 converter asBool*(v: ResultValue): bool =
+  ## If the value is numeric, return it as a boolean; otherwise
+  ## raise a `ValueError`. Note that `NULL` is neither true nor
+  ## false and will raise.
   case v.typ
   of rvtInteger:
     return v.intVal != 0
@@ -589,9 +610,54 @@ converter asBool*(v: ResultValue): bool =
   else:
     raise newException(ValueError, "cannot convert " & $(v.typ) & " to boolean")
 
+proc `==`*(v: ResultValue, s: string): bool =
+  ## Compare the result value to a string.
+  ## NULL values are not equal to any string.
+  ## Non-string non-NULL values will result in an exception.
+  case v.typ
+  of rvtNull:
+    return false
+  of rvtString, rvtBlob:
+    return v.strVal == s
+  else:
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to string")
+
+proc `==`*[T: SomeInteger](v: ResultValue, n: T): bool =
+  ## Compare the result value to an integer.
+  ## NULL values are not equal to any integer.
+  ## Non-integer non-NULL values (strings, etc.) will result in an exception.
+  case v.typ
+  of rvtInteger:
+    return v.intVal == n
+  of rvtLong:
+    return v.longVal == n
+  of rvtULong:
+    return v.uLongVal == n
+  of rvtNull:
+    return false
+  else:
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
+
+proc `==`*(v: ResultValue, b: bool): bool =
+  ## Compare a result value to a boolean.
+  ##
+  ## The MySQL wire protocol does
+  ## not have an explicit boolean type, so this tests an integer type against
+  ## zero. NULL values are not equal to true *or* false (therefore,
+  ## `if v == true:` is not equivalent to `if v:`: the latter will raise
+  ## an exception if v is NULL).
+  if v.typ == rvtNull:
+    return false
+  else:
+    return bool(v) == b
+
 proc isNil*(v: ResultString): bool {.inline.} = v.isNull
 
 proc `$`*(v: ResultString): string =
+  ## Produce an approximate string representation of the value. This
+  ## should mainly be restricted to debugging uses, since it is impossible
+  ## to distingiuish between a NULL value and the four-character
+  ## string "NULL".
   case v.isNull
   of true:
     return "NULL"
@@ -599,6 +665,8 @@ proc `$`*(v: ResultString): string =
     return v.value
 
 converter asString*(v: ResultString): string =
+  ## Return the result as a string.
+  ## Raise `ValueError` if the result is NULL.
   case v.isNull:
   of true:
     raise newException(ValueError, "NULL value")
@@ -606,6 +674,8 @@ converter asString*(v: ResultString): string =
     return v.value
 
 proc `==`*(a: ResultString, b: ResultString): bool =
+  ## Compare two result strings. **Note:** This does not
+  ## follow SQL semantics; NULL will compare equal to NULL.
   case a.isNull
   of true:
     return b.isNull
@@ -613,6 +683,8 @@ proc `==`*(a: ResultString, b: ResultString): bool =
     return (not b.isNull) and (a.value == b.value)
 
 proc `==`*(a: ResultString, b: string): bool =
+  ## Compare a result to a string. NULL results are not
+  ## equal to any string.
   case a.isNull
   of true:
     return false
@@ -624,9 +696,9 @@ proc asResultString*(s: string): ResultString {.inline.} =
 proc asResultString*(n: sqlNull): ResultString {.inline.} =
   ResultString(isNull: true)
 
-## ######################################################################
-##
-## MySQL packet packers/unpackers
+# ######################################################################
+#
+# MySQL packet packers/unpackers
 
 proc processHeader(c: Connection, hdr: array[4, char]): nat24 =
   result = int32(hdr[0]) + int32(hdr[1])*256 + int32(hdr[2])*65536
@@ -801,6 +873,7 @@ proc computeHandshakeResponse(conn: Connection,
   return buf
 
 proc sendCommand(conn: Connection, cmd: Command): Future[void] =
+  ## Send a simple, argument-less command.
   var buf: string = newString(5)
   buf[4] = char(cmd)
   return conn.sendPacket(buf, reset_seq_no=true)
@@ -904,6 +977,9 @@ proc expectOK(conn: Connection, ctxt: string): Future[ResponseOK] {.async.} =
     raise newException(ProtocolError, "unexpected response to " & ctxt)
 
 proc prepareStatement*(conn: Connection, query: string): Future[PreparedStatement] {.async.} =
+  ## Prepare a statement for future execution. The returned statement handle
+  ## must only be used with this connection. This is equivalent to
+  ## the `mysql_stmt_prepare()` function in the standard C API.
   var buf: string = newStringOfCap(4 + 1 + len(query))
   buf.setLen(4)
   buf.add( char(Command.statementPrepare) )
@@ -935,6 +1011,10 @@ proc prepStmtBuf(stmt: PreparedStatement, buf: var string, cmd: Command, cap: in
   for b in 0..3: buf[b+5] = stmt.statement_id[b]
 
 proc closeStatement*(conn: Connection, stmt: PreparedStatement): Future[void] =
+  ## Indicate to the server that this prepared statement is no longer
+  ## needed. Note that statement handles are not closed automatically
+  ## if garbage-collected, and will continue to occupy a statement
+  ## handle on the server side until the connection is closed.
   var buf: string
   stmt.prepStmtBuf(buf, Command.statementClose)
   return conn.sendPacket(buf, reset_seq_no=true)
@@ -1040,6 +1120,8 @@ proc finishEstablishingConnection(conn: Connection): Future[void] {.async.} =
 
 when declared(SslContext) and defined(ssl):
   proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = "", sslHostname: string, ssl: SslContext): Future[Connection] {.async.} =
+    ## Establish a connection, requesting SSL (TLS). The `sslHostname` and
+    ## `ssl` parameters are as used by `asyncnet.wrapConnectedSocket`.
     if isNil(ssl):
       raise newException(ValueError, "nil SSL context")
     if isNil(sock):
@@ -1070,6 +1152,14 @@ when declared(SslContext) and defined(ssl):
     await result.finishEstablishingConnection()
 
 proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = ""): Future[Connection] {.async.} =
+  ## Establish a database session. The caller is responsible for setting up
+  ## the underlying socket, which will be adopted by the returned `Connection`
+  ## instance and closed when the connection is closed.
+  ##
+  ## If `password` is non-empty,  password authentication is performed
+  ## (it is not possible to perform password authentication with a zero-length
+  ## password using this library). If `database` is non-empty, the named
+  ## database will be selected.
   if isNil(sock):
     raise newException(ValueError, "nil socket")
   else:
@@ -1082,6 +1172,7 @@ proc establishConnection*(sock: AsyncSocket not nil, username: string, password:
   await result.finishEstablishingConnection()
 
 proc textQuery*(conn: Connection, query: string): Future[ResultSet[ResultString]] {.async.} =
+  ## Perform a query using the text protocol, returning a single result set.
   await conn.sendQuery(query)
   let pkt = await conn.receivePacket()
   if isOKPacket(pkt):
@@ -1143,11 +1234,16 @@ proc performPreparedQuery(conn: Connection, stmt: PreparedStatement, st: Future[
     result.rows = rows
 
 proc preparedQuery*(conn: Connection, stmt: PreparedStatement, params: varargs[ParameterBinding, asParam]): Future[ResultSet[ResultValue]] =
+  ## Perform a query using the binary (prepared-statement) protocol,
+  ## returning a single result set.
   var pkt = formatBoundParams(stmt, params)
   var sent = conn.sendPacket(pkt, reset_seq_no=true)
   return performPreparedQuery(conn, stmt, sent)
 
 proc selectDatabase*(conn: Connection, database: string): Future[ResponseOK] {.async.} =
+  ## Select a database.
+  ## This is equivalent to the `mysql_select_db()` function in the
+  ## standard C API.
   var buf: string = newStringOfCap(4 + 1 + len(database))
   buf.setLen(4)
   buf.add( char(Command.initDb) )
@@ -1156,19 +1252,23 @@ proc selectDatabase*(conn: Connection, database: string): Future[ResponseOK] {.a
   return await conn.expectOK("COM_INIT_DB")
 
 proc ping*(conn: Connection): Future[ResponseOK] {.async.} =
+  ## Send a ping packet to the server to check for liveness.
+  ## This is equivalent to the `mysql_ping()` function in the
+  ## standard C API.
   await conn.sendCommand(Command.ping)
   return await conn.expectOK("COM_PING")
 
 proc close*(conn: Connection): Future[void] {.async.} =
+  ## Close the connection to the database, including the underlying socket.
   await conn.sendCommand(Command.quiT)
   let pkt = await conn.receivePacket(drop_ok=true)
   conn.socket.close()
 
-## ######################################################################
-##
-## Internal tests
-## These don't try to test everything, just basic things and things
-## that won't be exercised by functional testing against a server
+# ######################################################################
+#
+# Internal tests
+# These don't try to test everything, just basic things and things
+# that won't be exercised by functional testing against a server
 
 
 when isMainModule or defined(test):
