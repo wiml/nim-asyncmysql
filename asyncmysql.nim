@@ -4,7 +4,7 @@
 ## No attempt is made to make this look like the C-language
 ## libmysql API.
 ##
-## This is currently very experimental.
+## This is currently somewhat experimental.
 ##
 ## Copyright (c) 2015,2020 William Lewis
 ##
