@@ -327,6 +327,12 @@ const advertisedMaxPacketSize: uint32 = 65536 # max packet size, TODO: what shou
 
 # ######################################################################
 #
+# Forward declarations
+
+proc selectDatabase*(conn: Connection, database: string): Future[ResponseOK]
+
+# ######################################################################
+#
 # Basic datatype packers/unpackers
 
 # Integers
@@ -1108,15 +1114,21 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[ResultValu
       of fieldTypeEnum, fieldTypeSet, fieldTypeGeometry:
         raise newException(ProtocolError, "Unexpected field type " & $(typ) & " in resultset")
 
-proc finishEstablishingConnection(conn: Connection): Future[void] {.async.} =
+proc finishEstablishingConnection(conn: Connection, database: string): Future[void] {.async.} =
   # await confirmation from the server
   let pkt = await conn.receivePacket()
   if isOKPacket(pkt):
-    return
+    discard
   elif isERRPacket(pkt):
     raise parseErrorPacket(pkt)
   else:
     raise newException(ProtocolError, "Unexpected packet received after sending client handshake")
+
+  # Normally we bundle the initial database selection into the
+  # connection setup exchange, but if we couldn't do that, then do it
+  # here.
+  if len(database) > 0 and Cap.connectWithDb notin conn.client_caps:
+    discard await conn.selectDatabase(database)
 
 when declared(SslContext) and defined(ssl):
   proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = "", sslHostname: string, ssl: SslContext): Future[Connection] {.async.} =
@@ -1149,7 +1161,7 @@ when declared(SslContext) and defined(ssl):
     await result.sendPacket(response)
 
     # And finish the handshake
-    await result.finishEstablishingConnection()
+    await result.finishEstablishingConnection(database)
 
 proc establishConnection*(sock: AsyncSocket not nil, username: string, password: string, database: string = ""): Future[Connection] {.async.} =
   ## Establish a database session. The caller is responsible for setting up
@@ -1169,7 +1181,7 @@ proc establishConnection*(sock: AsyncSocket not nil, username: string, password:
                                           username, password, database,
                                           starttls = false)
   await result.sendPacket(response)
-  await result.finishEstablishingConnection()
+  await result.finishEstablishingConnection(database)
 
 proc textQuery*(conn: Connection, query: string): Future[ResultSet[ResultString]] {.async.} =
   ## Perform a query using the text protocol, returning a single result set.
