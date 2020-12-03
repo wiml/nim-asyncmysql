@@ -5,10 +5,12 @@ dist: xenial
 matrix:
   include:
     # Build and test against the master (stable) and devel branches of Nim
+    - env: NIMVERSION=1.4.0
+      services:
+        mysql
     - env: NIMVERSION=1.2.6
       services:
         mysql
-
     - env: NIMVERSION=1.0.2
       services:
         mysql
@@ -17,8 +19,6 @@ install:
   - curl https://nim-lang.org/download/nim-$NIMVERSION-linux_x64.tar.xz | xzcat | tar -C "$HOME" -xf -
   - export PATH=$HOME/nim-$NIMVERSION/bin:$HOME/.nimble/bin:$PATH
   - echo "export PATH=$PATH" >> ~/.profile
-  - printenv
-  # - nimble install -d -y
 
 before_script:
   - mysql -h 127.0.0.1 -u root -e "create database if not exists test;"
