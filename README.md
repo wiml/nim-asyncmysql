@@ -45,8 +45,9 @@ socket modules to support those.
 
 ### Binary protocol
 
-Floats and doubles are unsupported (but not hard to support). Likewise
-dates and times.
+Date and time values are not supported (but not hard to support). You
+can always CAST to a string or seconds-since-the-epoch format on the
+server side, though.
 
 Integer conversions between the local data types and the wire protocol
 might not be correct in all circumstances, especially if Nim's int is

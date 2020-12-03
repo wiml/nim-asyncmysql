@@ -13,6 +13,8 @@
 import asyncnet, asyncdispatch
 import strutils
 import std/sha1 as sha1
+from endians import nil
+from math import fcNormal, fcZero, fcNegZero, fcSubnormal, fcNan, fcInf, fcNegInf
 
 when defined(ssl):
   import net  # needed for the SslContext type
@@ -215,8 +217,10 @@ type
         strVal: string
       of rvtNull:
         discard
-      of rvtFloat32, rvtFloat64:
-        discard # TODO
+      of rvtFloat32:
+        floatVal: float32
+      of rvtFloat64:
+        doubleVal: float64
       of rvtDate, rvtTime, rvtDateTime:
         discard # TODO
 
@@ -235,7 +239,8 @@ type
     paramBlob,
     paramInt,
     paramUInt,
-    # paramFloat, paramDouble,
+    paramFloat,
+    paramDouble,
     # paramLazyString, paramLazyBlob,
   ParameterBinding* = object
     ## This represents a value we're sending to the server as a parameter.
@@ -251,6 +256,10 @@ type
         intVal: int64
       of paramUInt:
         uintVal: uint64
+      of paramFloat:
+        floatVal: float32
+      of paramDouble:
+        doubleVal: float64
 
 type
   nat24 = range[0 .. 16777215]
@@ -428,6 +437,25 @@ proc putLenStr(buf: var string, val: string) =
   putLenInt(buf, val.len)
   buf.add(val)
 
+
+# Floating point numbers. We assume that the wire protocol is always
+# little-endian IEEE-754 (because all the world's a Vax^H^H^H 386),
+# and we assume that the native representation is also IEEE-754 (but
+# we check that second assumption in our unit tests).
+proc scanIEEE754Single(buf: string, pos: int): float32 =
+  endians.littleEndian32(addr(result), unsafeAddr(buf[pos]))
+proc scanIEEE754Double(buf: string, pos: int): float64 =
+  endians.littleEndian64(addr(result), unsafeAddr(buf[pos]))
+
+proc putIEEE754(buf: var string, val: float32) =
+  let oldLen = buf.len()
+  buf.setLen(oldLen + 4)
+  endians.littleEndian32(addr(buf[oldLen]), unsafeAddr val)
+proc putIEEE754(buf: var string, val: float64) =
+  let oldLen = buf.len()
+  buf.setLen(oldLen + 8)
+  endians.littleEndian64(addr(buf[oldLen]), unsafeAddr val)
+
 proc hexdump(buf: openarray[char], fp: File) =
   var pos = low(buf)
   while pos <= high(buf):
@@ -485,6 +513,12 @@ proc addTypeUnlessNULL(p: ParameterBinding, pkt: var string) =
     else:
       pkt.add(char(fieldTypeLongLong))
     pkt.add(char(0x80))
+  of paramFloat:
+    pkt.add(char(fieldTypeFloat))
+    pkt.add(char(0))
+  of paramDouble:
+    pkt.add(char(fieldTypeDouble))
+    pkt.add(char(0))
 
 proc addValueUnlessNULL(p: ParameterBinding, pkt: var string) =
   case p.typ
@@ -512,6 +546,10 @@ proc addValueUnlessNULL(p: ParameterBinding, pkt: var string) =
     putU32(pkt, uint32(p.uintVal and 0xFFFFFFFF'u64))
     if p.uintVal >= 0xFFFFFFFF'u64:
       putU32(pkt, uint32(p.uintVal shr 32))
+  of paramFloat:
+    pkt.putIEEE754(p.floatVal)
+  of paramDouble:
+    pkt.putIEEE754(p.doubleVal)
 
 proc approximatePackedSize(p: ParameterBinding): int {.inline.} =
   case p.typ
@@ -519,8 +557,10 @@ proc approximatePackedSize(p: ParameterBinding): int {.inline.} =
     return 0
   of paramString, paramBlob:
     return 5 + len(p.strVal)
-  of paramInt, paramUInt:
+  of paramInt, paramUInt, paramFloat:
     return 4
+  of paramDouble:
+    return 8
 
 proc asParam*(n: sqlNull): ParameterBinding {. inline .} = ParameterBinding(typ: paramNull)
 
@@ -548,6 +588,12 @@ proc asParam*(i: uint64): ParameterBinding =
 
 proc asParam*(b: bool): ParameterBinding = ParameterBinding(typ: paramInt, intVal: if b: 1 else: 0)
 
+proc asParam*(f: float32): ParameterBinding {. inline .} =
+  ParameterBinding(typ: paramFloat, floatVal:f)
+
+proc asParam*(f: float64): ParameterBinding {. inline .} =
+  ParameterBinding(typ: paramDouble, doubleVal:f)
+
 proc isNil*(v: ResultValue): bool {.inline.} = v.typ == rvtNull
 
 proc `$`*(v: ResultValue): string =
@@ -566,11 +612,15 @@ proc `$`*(v: ResultValue): string =
     return $(v.longVal)
   of rvtULong:
     return $(v.uLongVal)
+  of rvtFloat32:
+    return $(v.floatVal)
+  of rvtFloat64:
+    return $(v.doubleVal)
   else:
     return "(unrepresentable!)"
 
 {.push overflowChecks: on .}
-proc toNumber[T](v: ResultValue): T {.inline.} =
+proc toNumber[T: SomeInteger](v: ResultValue): T {.inline.} =
   case v.typ
   of rvtInteger:
     return T(v.intVal)
@@ -581,13 +631,29 @@ proc toNumber[T](v: ResultValue): T {.inline.} =
   of rvtNull:
     raise newException(ValueError, "NULL value")
   else:
-    raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to " & $(T))
 
+# Converters can't be generic; we need to explicitly instantiate
+# the ones we think might be needed.
 converter asInt8*(v: ResultValue): uint8 = return toNumber[uint8](v)
 converter asInt*(v: ResultValue): int = return toNumber[int](v)
 converter asUInt*(v: ResultValue): uint = return toNumber[uint](v)
 converter asInt64*(v: ResultValue): int64 = return toNumber[int64](v)
 converter asUInt64*(v: ResultValue): uint64 = return toNumber[uint64](v)
+
+proc toFloat[T: SomeFloat](v: ResultValue): T {.inline.} =
+  case v.typ
+  of rvtFloat32:
+    return v.floatVal
+  of rvtFloat64:
+    return v.doubleVal
+  of rvtNULL:
+    raise newException(ValueError, "NULL value")
+  else:
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to float")
+
+converter asFloat32*(v: ResultValue): float32 = toFloat[float32](v)
+converter asFloat64*(v: ResultValue): float64 = toFloat[float64](v)
 {. pop .}
 
 converter asString*(v: ResultValue): string =
@@ -598,7 +664,7 @@ converter asString*(v: ResultValue): string =
   of rvtString, rvtBlob:
     return v.strVal
   else:
-    raise newException(ValueError, "value is " & $(v.typ) & ", not string")
+    raise newException(ValueError, "cannot convert " & $(v.typ) & " to string")
 
 converter asBool*(v: ResultValue): bool =
   ## If the value is numeric, return it as a boolean; otherwise
@@ -628,21 +694,86 @@ proc `==`*(v: ResultValue, s: string): bool =
   else:
     raise newException(ValueError, "cannot convert " & $(v.typ) & " to string")
 
+proc floatEqualsInt[F: SomeFloat, I: SomeInteger](v: F, n: I): bool =
+  ## Compare a float to an integer. Note that this is inherently a
+  ## dodgy operation (which is why it's not overloading `==`). Floats
+  ## are inexact, and each float corresponds to a range of real numbers;
+  ## for larger numbers, a single float value can be "equal to" many
+  ## different integers. (Or maybe it''s equal to none of them if it
+  ## can't represent any of them exactly — it really depends on what
+  ## you're modeling with that float, doesn''t it?) Anyway, for my particular
+  ## case I don't care about that.
+
+  # Infinities, NaNs, etc., are not equal to any integer. Subnormals
+  # are also always less than 1 (and nonzero) so cannot be integers.
+  case math.classify(v)
+  of fcNormal:
+    if n == 0:
+      return false
+    else:
+      return v == F(n)  # kludge
+  of fcZero, fcNegZero:
+    return n == 0
+  of fcSubnormal, fcNan, fcInf, fcNegInf:
+    return false
+
+proc `==`[S: SomeSignedInt, U: SomeUnsignedInt](s: S, u: U): bool =
+  ## Safely compare a signed and an unsigned integer of possibly
+  ## different widths.
+  if s < 0:
+    return false
+  when sizeof(U) >= sizeof(S):
+    if u > U(high(S)):
+      return false
+    else:
+      return S(u) == s
+  else:
+    if s > S(high(U)):
+      return false
+    else:
+      return U(s) == u
+
+when (NimMajor, NimMinor) < (1, 2) and uint isnot uint64:
+  # Support for Nim < 1.2
+  proc `==`(a: uint, b: uint64): bool =
+    return uint64(a) == b
+
 proc `==`*[T: SomeInteger](v: ResultValue, n: T): bool =
   ## Compare the result value to an integer.
   ## NULL values are not equal to any integer.
-  ## Non-integer non-NULL values (strings, etc.) will result in an exception.
+  ## Non-numeric non-NULL values (strings, etc.) will result in an exception.
+  ##
+  ## As a special case, this allows comparing a floating point ResultValue
+  ## to an integer.
   case v.typ
   of rvtInteger:
     return v.intVal == n
   of rvtLong:
     return v.longVal == n
   of rvtULong:
-    return v.uLongVal == n
+    return n == v.uLongVal
+  of rvtFloat32:
+    return floatEqualsInt(v.floatVal, n)
+  of rvtFloat64:
+    return floatEqualsInt(v.doubleVal, n)
   of rvtNull:
     return false
   else:
-    raise newException(ValueError, "cannot convert " & $(v.typ) & " to integer")
+    raise newException(ValueError, "cannot compare " & $(v.typ) & " to integer")
+
+proc `==`*[F: SomeFloat](v: ResultValue, n: F): bool =
+  ## Compare the result value to a float.
+  ## NULL values are not equal to anything.
+  ## Non-float values (including integers) will result in an exception.
+  case v.typ
+  of rvtFloat32:
+    return v.floatVal == n
+  of rvtFloat64:
+    return v.doubleVal == n
+  of rvtNull:
+    return false
+  else:
+    raise newException(ValueError, "cannot compare " & $(v.typ) & " to floating-point number")
 
 proc `==`*(v: ResultValue, b: bool): bool =
   ## Compare a result value to a boolean.
@@ -651,7 +782,7 @@ proc `==`*(v: ResultValue, b: bool): bool =
   ## not have an explicit boolean type, so this tests an integer type against
   ## zero. NULL values are not equal to true *or* false (therefore,
   ## `if v == true:` is not equivalent to `if v:`: the latter will raise
-  ## an exception if v is NULL).
+  ## an exception if v is NULL). Non-integer values will result in an exception.
   if v.typ == rvtNull:
     return false
   else:
@@ -1105,7 +1236,15 @@ proc parseBinaryRow(columns: seq[ColumnDefinition], pkt: string): seq[ResultValu
           result[ix] = ResultValue(typ: rvtULong, uLongVal: v)
         else:
           result[ix] = ResultValue(typ: rvtLong, longVal: cast[int64](v))
-      of fieldTypeFloat, fieldTypeDouble, fieldTypeTime, fieldTypeDate, fieldTypeDateTime, fieldTypeTimestamp:
+      of fieldTypeFloat:
+        result[ix] = ResultValue(typ: rvtFloat32,
+                                 floatVal: scanIEEE754Single(pkt, pos))
+        inc(pos, 4)
+      of fieldTypeDouble:
+        result[ix] = ResultValue(typ: rvtFloat64,
+                                 doubleVal: scanIEEE754Double(pkt, pos))
+        inc(pos, 8)
+      of fieldTypeTime, fieldTypeDate, fieldTypeDateTime, fieldTypeTimestamp:
         raise newException(Exception, "Not implemented, TODO")
       of fieldTypeTinyBlob, fieldTypeMediumBlob, fieldTypeLongBlob, fieldTypeBlob, fieldTypeBit:
         result[ix] = ResultValue(typ: rvtBlob, strVal: scanLenStr(pkt, pos))
@@ -1399,6 +1538,20 @@ when isMainModule or defined(test):
            "fe000280038003800880020008000800"   &  # wire type info
            "0568656c6c6ffffff3f2f100ffffffffffffffffff000000abcd56f53f7fffffffff0002000000000080",
            hexstr(buf3))
+
+    stdmsg.write("  floats and doubles: ")
+    const e32: float32 = 0.00000011920928955078125'f32
+    let buf4 = formatBoundParams(sth, [
+      asParam(0'f32), asParam(65535'f32),
+      asParam(e32), asParam(1 + e32),
+      asParam(0'f64), asParam(-1'f64),
+      asParam(float64(e32)), asParam(1 + float64(e32)), asParam(1024 + float64(e32)) ])
+    expect("000000001700ffaa550001000000000001" &   # packet header
+           "040004000400040005000500050005000500" & # wire type info
+           "0000000000ff7f47000000340100803f" & # floats
+           "0000000000000000000000000000f0bf" & # doubles
+           "000000000000803e000000200000f03f0000080000009040",
+           hexstr(buf4))
 
   proc runInternalTests*() =
     echo "Running asyncmysql internal tests"
