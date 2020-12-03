@@ -1,6 +1,7 @@
-Non-blocking mysql client for Nim [![Build Status](https://travis-ci.org/wiml/nim-asyncmysql.svg?branch=master)](https://travis-ci.org/wiml/nim-asyncmysql)
-
+Non-blocking mysql client for Nim
 =================================
+
+[![Build Status](https://travis-ci.org/wiml/nim-asyncmysql.svg?branch=master)](https://travis-ci.org/wiml/nim-asyncmysql)
 
 This is a scratch-written pure-[Nim][nimlang] implementation of the client
 side of the MySQL database protocol (also compatible
@@ -33,6 +34,7 @@ transaction support.
 
 The API presented by this module is very specific to MySQL. A more
 generic async DB API would be nice.
+That API would ideally be a separate layer on top of the MySQL-specific API.
 
 Long packets (more than 2^24-1 bytes) are not handled correctly.
 
