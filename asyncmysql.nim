@@ -19,6 +19,10 @@ from math import fcNormal, fcZero, fcNegZero, fcSubnormal, fcNan, fcInf, fcNegIn
 when defined(ssl):
   import net  # needed for the SslContext type
 
+when isMainModule:
+  import unittest
+  proc hexstr(s: string): string
+
 # These are protocol constants; see
 #  https://dev.mysql.com/doc/internals/en/overview.html
 
@@ -456,7 +460,82 @@ proc putIEEE754(buf: var string, val: float64) =
   buf.setLen(oldLen + 8)
   endians.littleEndian64(addr(buf[oldLen]), unsafeAddr val)
 
-proc hexdump(buf: openarray[char], fp: File) =
+when isMainModule: suite "Packing/unpacking of primitive types":
+  test "Integers":
+    var buf: string = ""
+    putLenInt(buf, 0)
+    putLenInt(buf, 1)
+    putLenInt(buf, 250)
+    putLenInt(buf, 251)
+    putLenInt(buf, 252)
+    putLenInt(buf, 512)
+    putLenInt(buf, 640)
+    putLenInt(buf, 65535)
+    putLenInt(buf, 65536)
+    putLenInt(buf, 15715755)
+    putU32(buf, uint32(65535))
+    putU32(buf, uint32(65536))
+    putU32(buf, 0x80C00AAA'u32)
+    check "0001fafcfb00fcfc00fc0002fc8002fcfffffd000001fdabcdefffff000000000100aa0ac080" == hexstr(buf)
+
+    var pos: int = 0
+    check 0         == scanLenInt(buf, pos)
+    check 1         == scanLenInt(buf, pos)
+    check 250       == scanLenInt(buf, pos)
+    check 251       == scanLenInt(buf, pos)
+    check 252       == scanLenInt(buf, pos)
+    check 512       == scanLenInt(buf, pos)
+    check 640       == scanLenInt(buf, pos)
+    check 0x0FFFF   == scanLenInt(buf, pos)
+    check 0x10000   == scanLenInt(buf, pos)
+    check 15715755  == scanLenInt(buf, pos)
+    check 65535'u32 == scanU32(buf, pos)
+    check 65535'u16 == scanU16(buf, pos)
+    check 255'u16   == scanU16(buf, pos+1)
+    check 0'u16     == scanU16(buf, pos+2)
+    pos += 4
+    check 65536'u32 == scanU32(buf, pos)
+    pos += 4
+    check 0x80C00AAA'u32 == scanU32(buf, pos)
+    pos += 4
+    check 0x80C00AAA00010000'u64 == scanU64(buf, pos-8)
+    check len(buf) == pos
+
+  const e32: float32 = 0.00000011920928955078125'f32
+
+  test "Floats":
+    var buf: string = ""
+
+    putIEEE754(buf, 1.0'f32)
+    putIEEE754(buf, e32)
+    putIEEE754(buf, 1.0'f32 + e32)
+    check "0000803f000000340100803f" == hexstr(buf)
+    check:
+      scanIEEE754Single(buf, 0) == 1.0'f32
+      scanIEEE754Single(buf, 4) == e32
+      scanIEEE754Single(buf, 8) == 1.0'f32 + e32
+
+    # Non-word-aligned
+    check:
+      scanIEEE754Single("XAB\x01\x49Y", 1) == 0x81424 + 0.0625'f32
+
+  test "Doubles":
+    var buf: string = ""
+
+    putIEEE754(buf, -2.0'f64)
+    putIEEE754(buf, float64(e32))
+    putIEEE754(buf, 1024'f64 + float64(e32))
+    check "00000000000000c0000000000000803e0000080000009040" == hexstr(buf)
+    check:
+      scanIEEE754Double(buf, 0) == -2'f64
+      scanIEEE754Double(buf, 8) == float64(e32)
+      scanIEEE754Double(buf, 16) == 1024'f64 + float64(e32)
+
+    # Non-word-aligned
+    check:
+      scanIEEE754Double("XYZGFEDCB\xFA\x42QRS", 3) == float64(0x1A42434445464) + 0.4375'f64
+
+proc hexdump(buf: openarray[char], fp: File) {.used.} =
   var pos = low(buf)
   while pos <= high(buf):
     for i in 0 .. 15:
@@ -897,6 +976,17 @@ proc mysql_native_password_hash(scramble: string, password: string): string =
   for i in 0 .. high(phash1):
     result[i] = char(phash1[i] xor rhs[i])
 const mysql_native_password_plugin = "mysql_native_password"
+
+when isMainModule:
+  test "Password hash":
+    # Test vectors captured from tcp traces of official mysql
+    check hexstr(mysql_native_password_hash("L\\i{NQ09k2W>p<yk/DK+",
+                                            "foo")) ==
+                 "f828cd1387160a4c920f6c109d37285d281f7c85"
+
+    check hexstr(mysql_native_password_hash("<G.N}OR-(~e^+VQtrao-",
+                                            "aaaaaaaaaaaaaaaaaaaabbbbbbbbbb")) ==
+                 "78797fae31fc733107e778ee36e124436761bddc"
 
 proc parseInitialGreeting(conn: Connection, greeting: string): greetingVars =
   let protocolVersion = uint8(greeting[0])
@@ -1422,7 +1512,7 @@ proc close*(conn: Connection): Future[void] {.async.} =
 # that won't be exercised by functional testing against a server
 
 
-when isMainModule or defined(test):
+when isMainModule:
   proc hexstr(s: string): string =
     result = ""
     let chs = "0123456789abcdef"
@@ -1430,134 +1520,48 @@ when isMainModule or defined(test):
       let i = int(ch)
       result.add(chs[ (i and 0xF0) shr 4])
       result.add(chs[  i and 0x0F ])
-  proc expect(expected: string, got: string) =
-    if expected == got:
-      stdmsg.writeLine("OK")
-    else:
-      stdmsg.writeLine("FAIL")
-      stdmsg.writeLine("    expected: ", expected)
-      stdmsg.writeLine("         got: ", got)
-  proc expectint[T](expected: T, got: T): int =
-    if expected == got:
-      return 0
-    stdmsg.write(" ", expected, "!=", got)
-    return 1
-  when declared(mysql_native_password_hash):
-    proc test_native_hash(scramble: string, password: string, expected: string) =
-      let got = mysql_native_password_hash(scramble, password)
-      expect(expected, hexstr(got))
 
-    proc test_hashes() =
-      echo "- Password hashing"
-      # Test vectors captured from tcp traces of official mysql
-      stdmsg.write("  test vec 1: ")
-      test_native_hash("L\\i{NQ09k2W>p<yk/DK+",
-                      "foo",
-                      "f828cd1387160a4c920f6c109d37285d281f7c85")
-      stdmsg.write("  test vec 2: ")
-      test_native_hash("<G.N}OR-(~e^+VQtrao-",
-                      "aaaaaaaaaaaaaaaaaaaabbbbbbbbbb",
-                      "78797fae31fc733107e778ee36e124436761bddc")
-  else: # not declared(mysql_native_password_hash)
-    proc test_hashes() =
-     stdmsg.writeLine "- Password hashing: SKIPPED (passwords not supported in this build)"
-
-  proc test_prim_values() =
-    echo "- Packing/unpacking of primitive types"
-    stdmsg.write("  packing: ")
-    var buf: string = ""
-    putLenInt(buf, 0)
-    putLenInt(buf, 1)
-    putLenInt(buf, 250)
-    putLenInt(buf, 251)
-    putLenInt(buf, 252)
-    putLenInt(buf, 512)
-    putLenInt(buf, 640)
-    putLenInt(buf, 65535)
-    putLenInt(buf, 65536)
-    putLenInt(buf, 15715755)
-    putU32(buf, uint32(65535))
-    putU32(buf, uint32(65536))
-    putU32(buf, 0x80C00AAA'u32)
-    expect("0001fafcfb00fcfc00fc0002fc8002fcfffffd000001fdabcdefffff000000000100aa0ac080", hexstr(buf))
-    stdmsg.write("  unpacking: ")
-    var pos: int = 0
-    var fails: int = 0
-    fails += expectint(0      , scanLenInt(buf, pos))
-    fails += expectint(1      , scanLenInt(buf, pos))
-    fails += expectint(250    , scanLenInt(buf, pos))
-    fails += expectint(251    , scanLenInt(buf, pos))
-    fails += expectint(252    , scanLenInt(buf, pos))
-    fails += expectint(512    , scanLenInt(buf, pos))
-    fails += expectint(640    , scanLenInt(buf, pos))
-    fails += expectint(0x0FFFF, scanLenInt(buf, pos))
-    fails += expectint(0x10000, scanLenInt(buf, pos))
-    fails += expectint(15715755, scanLenInt(buf, pos))
-    fails += expectint(65535, int(scanU32(buf, pos)))
-    fails += expectint(65535'u16, scanU16(buf, pos))
-    fails += expectint(255'u16, scanU16(buf, pos+1))
-    fails += expectint(0'u16, scanU16(buf, pos+2))
-    pos += 4
-    fails += expectint(65536, int(scanU32(buf, pos)))
-    pos += 4
-    fails += expectint(0x80C00AAA, int(scanU32(buf, pos)))
-    pos += 4
-    fails += expectint(0x80C00AAA00010000'u64, scanU64(buf, pos-8))
-    fails += expectint(len(buf), pos)
-    if fails == 0:
-      stdmsg.writeLine(" OK")
-    else:
-      stdmsg.writeLine(" FAIL")
-
-  proc test_param_pack() =
-    echo "- Testing parameter packing"
+  test "Parameter packing":
     let dummy_param = ColumnDefinition()
     var sth: PreparedStatement
     new(sth)
     sth.statement_id = ['\0', '\xFF', '\xAA', '\x55' ]
     sth.parameters = @[dummy_param, dummy_param, dummy_param, dummy_param, dummy_param, dummy_param, dummy_param, dummy_param]
-    stdmsg.write("  packing small numbers, 1: ")
+
+    # Small numbers
     let buf = formatBoundParams(sth, [ asParam(0), asParam(1), asParam(127), asParam(128), asParam(255), asParam(256), asParam(-1), asParam(-127) ])
-    expect("000000001700ffaa5500010000000001" &  # packet header
-           "01800180018001800180028001000100" &  # wire type info
-           "00017f80ff0001ff81",                 # packed values
-           hexstr(buf))
-    stdmsg.write("  packing numbers and NULLs: ")
+    let h = "000000001700ffaa5500010000000001" &  # packet header
+            "01800180018001800180028001000100" &  # wire type info
+            "00017f80ff0001ff81"                  # packed values
+    check h == hexstr(buf)
+
+    # Numbers and NULLs
     sth.parameters = sth.parameters & dummy_param
     let buf2 = formatBoundParams(sth, [ asParam(-128), asParam(-129), asParam(-255), asParam(nil), asParam(SQLNULL), asParam(-256), asParam(-257), asParam(-32768), asParam(SQLNULL)  ])
-    expect("000000001700ffaa550001000000180101" &  # packet header
-           "010002000200020002000200" &            # wire type info
-           "807fff01ff00fffffe0080",               # packed values
-           hexstr(buf2))
+    let h2 = "000000001700ffaa550001000000180101" &  # packet header
+             "010002000200020002000200" &            # wire type info
+             "807fff01ff00fffffe0080"                # packed values
+    check h2 == hexstr(buf2)
 
-    stdmsg.write("  more values: ")
+    # More values (strings, etc)
     let buf3 = formatBoundParams(sth, [ asParam("hello"), asParam(SQLNULL),
       asParam(0xFFFF), asParam(0xF1F2F3), asParam(0xFFFFFFFF), asParam(0xFFFFFFFFFF),
       asParam(-12885), asParam(-2160069290), asParam(low(int64) + 512) ])
-    expect("000000001700ffaa550001000000020001" &  # packet header
-           "fe000280038003800880020008000800"   &  # wire type info
-           "0568656c6c6ffffff3f2f100ffffffffffffffffff000000abcd56f53f7fffffffff0002000000000080",
-           hexstr(buf3))
+    let h3 = "000000001700ffaa550001000000020001" &  # packet header
+             "fe000280038003800880020008000800"   &  # wire type info
+             "0568656c6c6ffffff3f2f100ffffffffffffffffff000000abcd56f53f7fffffffff0002000000000080"
+    check h3 == hexstr(buf3)
 
-    stdmsg.write("  floats and doubles: ")
+    # Floats and doubles
     const e32: float32 = 0.00000011920928955078125'f32
     let buf4 = formatBoundParams(sth, [
       asParam(0'f32), asParam(65535'f32),
       asParam(e32), asParam(1 + e32),
       asParam(0'f64), asParam(-1'f64),
       asParam(float64(e32)), asParam(1 + float64(e32)), asParam(1024 + float64(e32)) ])
-    expect("000000001700ffaa550001000000000001" &   # packet header
-           "040004000400040005000500050005000500" & # wire type info
-           "0000000000ff7f47000000340100803f" & # floats
-           "0000000000000000000000000000f0bf" & # doubles
-           "000000000000803e000000200000f03f0000080000009040",
-           hexstr(buf4))
-
-  proc runInternalTests*() =
-    echo "Running asyncmysql internal tests"
-    test_prim_values()
-    test_param_pack()
-    test_hashes()
-
-  when isMainModule:
-    runInternalTests()
+    let h4 = "000000001700ffaa550001000000000001" &   # packet header
+             "040004000400040005000500050005000500" & # wire type info
+             "0000000000ff7f47000000340100803f" & # floats
+             "0000000000000000000000000000f0bf" & # doubles
+             "000000000000803e000000200000f03f0000080000009040"
+    check h4 == hexstr(buf4)

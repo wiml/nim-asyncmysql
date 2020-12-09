@@ -26,7 +26,8 @@ before_script:
   - mysql -h 127.0.0.1 -u root -e "grant all on test.* to 'nimtest'@'127.0.0.1';"
 
 script:
-  # - nimble check
+  - nimble check
+  - nim c -d:test -d:ssl -r asyncmysql.nim
   - nim c -d:test test_sql.nim
   - ./test_sql --no-ssl -D test -h localhost -u nimtest --password 123456
   - nim c -d:ssl -d:test test_sql.nim

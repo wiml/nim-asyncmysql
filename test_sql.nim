@@ -320,8 +320,6 @@ block:
   if database_name.len == 0 or user_name.len == 0 or port < 1 or port > 65535:
     usage()
 
-when defined(test):
-  runInternalTests()
 waitFor(runTests())
 echo "Done"
 quit(QuitSuccess)
