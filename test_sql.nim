@@ -213,9 +213,11 @@ proc floatTests(conn: Connection): Future[void] {.async.} =
   let r2 = await conn.preparedQuery(rdtab)
   assertEq(int, r2.rows.len(), 3, "row count")
 
+  doAssert(r2.rows[0][1] == 524288'i32)
   doAssert(r2.rows[0][1] == 524288'i64)
   doAssert(r2.rows[0][1] == 524288'f32)
   doAssert(r2.rows[0][1] == 524288'f64)
+  doAssert(r2.rows[0][2] == 1073741824'i32)
   doAssert(r2.rows[0][2] == 1073741824'i64)
   doAssert(r2.rows[0][2] == 1073741824'f32)
   doAssert(r2.rows[0][2] == 1073741824'f64)

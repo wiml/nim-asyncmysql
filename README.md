@@ -51,10 +51,6 @@ Date and time values are not supported (but not hard to support). You
 can always CAST to a string or seconds-since-the-epoch format on the
 server side, though.
 
-Integer conversions between the local data types and the wire protocol
-might not be correct in all circumstances, especially if Nim's int is
-32 bits wide.
-
 The protocol allows streaming large values to the server (if, for example,
 you are inserting a large BLOB) and this could be implemented elegantly
 as parameter that lazily generates strings.

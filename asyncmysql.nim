@@ -501,6 +501,43 @@ when isMainModule: suite "Packing/unpacking of primitive types":
     check 0x80C00AAA00010000'u64 == scanU64(buf, pos-8)
     check len(buf) == pos
 
+  test "Integers (bit-walking tests)":
+    for bit in 0..63:
+      var byhand: string = "\xFF"
+      var test: string
+
+      for b_off in 0..7:
+        if b_off == bit div 8:
+          byhand.add(chr(0x01 shl (bit mod 8)))
+        else:
+          byhand.add(chr(0))
+
+      if bit < 16:
+        let v16: uint16 = (1'u16) shl bit
+        check scanU16(byhand, 1) == v16
+        test = "\xFF"
+        putU16(test, v16)
+        test &= "\x00\x00\x00\x00\x00\x00"
+        check test == byhand
+        check hexstr(test) == hexstr(byhand)
+
+      if bit < 32:
+        let v32: uint32 = (1'u32) shl bit
+        check scanU32(byhand, 1) == v32
+        test = "\xFF"
+        putU32(test, v32)
+        test &= "\x00\x00\x00\x00"
+        check test == byhand
+
+      if bit < 63:
+        test = "\xFF"
+        putS64(test, (1'i64) shl bit)
+        check test == byhand
+        check hexstr(test) == hexstr(byhand)
+
+      let v64: uint64 = (1'u64) shl bit
+      check scanU64(byhand, 1) == v64
+
   const e32: float32 = 0.00000011920928955078125'f32
 
   test "Floats":
